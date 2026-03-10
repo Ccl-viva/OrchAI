@@ -191,10 +191,73 @@ def update_workflow(
 
 
 def update_node(node_id: str, *, status: str) -> None:
+    update_node_data(node_id, status=status)
+
+
+def update_node_data(
+    node_id: str,
+    *,
+    status: str | None = None,
+    parameters: dict[str, Any] | None = None,
+) -> None:
+    if status is None and parameters is None:
+        return
+
     with _DB_LOCK:
         conn = get_conn()
         try:
-            conn.execute("UPDATE nodes SET status = ? WHERE id = ?", (status, node_id))
+            if status is not None and parameters is not None:
+                conn.execute(
+                    "UPDATE nodes SET status = ?, parameters = ? WHERE id = ?",
+                    (status, _dumps(parameters), node_id),
+                )
+            elif status is not None:
+                conn.execute("UPDATE nodes SET status = ? WHERE id = ?", (status, node_id))
+            elif parameters is not None:
+                conn.execute("UPDATE nodes SET parameters = ? WHERE id = ?", (_dumps(parameters), node_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_node(node_id: str) -> dict[str, Any] | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, workflow_id, order_index, type, parameters, status
+            FROM nodes
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (node_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "workflow_id": row["workflow_id"],
+            "order_index": row["order_index"],
+            "type": row["type"],
+            "parameters": _loads(row["parameters"]),
+            "status": row["status"],
+        }
+    finally:
+        conn.close()
+
+
+def reset_nodes_from(workflow_id: str, start_order_index: int) -> None:
+    with _DB_LOCK:
+        conn = get_conn()
+        try:
+            conn.execute(
+                """
+                UPDATE nodes
+                SET status = 'pending'
+                WHERE workflow_id = ? AND order_index >= ?
+                """,
+                (workflow_id, start_order_index),
+            )
             conn.commit()
         finally:
             conn.close()

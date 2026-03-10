@@ -31,12 +31,21 @@ def _resolve_column(df: pd.DataFrame, field: str) -> str | None:
     return lowered.get(field.lower())
 
 
-def execute_parse_excel(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def execute_parse_excel(
+    state: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     uploaded_file = state.get("uploaded_file")
     if not uploaded_file:
         raise ValueError("File is not uploaded yet.")
 
-    df = pd.read_excel(uploaded_file)
+    parameters = parameters or {}
+    sheet_name = parameters.get("sheet_name")
+    read_kwargs: dict[str, Any] = {}
+    if isinstance(sheet_name, (str, int)):
+        read_kwargs["sheet_name"] = sheet_name
+
+    df = pd.read_excel(uploaded_file, **read_kwargs)
     df = _normalize_columns(df)
     preview = _df_preview(df)
 
@@ -44,23 +53,41 @@ def execute_parse_excel(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str
     state["preview"] = preview
 
     return state, {
-        "message": "Excel parsed successfully.",
+        "message": "Excel parsed successfully." if "sheet_name" not in read_kwargs else f"Excel parsed from sheet '{sheet_name}'.",
         "preview": preview,
     }
+
+
+def _normalize_method(method: str | None) -> str:
+    raw = (method or "sum").strip().lower()
+    if raw in {"avg", "average"}:
+        return "mean"
+    return raw
+
+
+def _apply_aggregation(series: pd.Series, method: str) -> float:
+    if method == "sum":
+        return float(series.sum())
+    if method == "mean":
+        return float(series.mean()) if len(series) else 0.0
+    if method == "max":
+        return float(series.max()) if len(series) else 0.0
+    if method == "min":
+        return float(series.min()) if len(series) else 0.0
+    if method == "count":
+        return float(series.count())
+    raise ValueError(f"Unsupported method: {method}")
 
 
 def execute_aggregate(state: dict[str, Any], parameters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     uploaded_file = state.get("uploaded_file")
     field = state.get("selected_field") or parameters.get("field")
-    method = parameters.get("method", "sum")
+    method = _normalize_method(str(parameters.get("method", "sum")))
 
     if not uploaded_file:
         raise ValueError("File is not uploaded yet.")
     if not field:
         raise ValueError("No field selected for aggregation.")
-    if method != "sum":
-        raise ValueError(f"Unsupported method: {method}")
-
     df = pd.read_excel(uploaded_file)
     df = _normalize_columns(df)
     resolved_field = _resolve_column(df, field)
@@ -68,10 +95,10 @@ def execute_aggregate(state: dict[str, Any], parameters: dict[str, Any]) -> tupl
         raise ValueError(f"Field '{field}' not found in columns: {list(df.columns)}")
 
     series = pd.to_numeric(df[resolved_field], errors="coerce").fillna(0.0)
-    total = float(series.sum())
+    total = _apply_aggregation(series, method)
     result_preview = {
         "type": "table",
-        "columns": [f"{resolved_field}_sum"],
+        "columns": [f"{resolved_field}_{method}"],
         "rows": [[total]],
     }
 
@@ -90,12 +117,22 @@ def execute_aggregate(state: dict[str, Any], parameters: dict[str, Any]) -> tupl
     }
 
 
-def execute_export_excel(workflow_id: str, state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def execute_export_excel(
+    workflow_id: str,
+    state: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     result = state.get("aggregate_result")
     if not result:
         raise ValueError("No aggregation result to export.")
 
-    output_path = Path(EXPORT_DIR) / f"{workflow_id}_result.xlsx"
+    parameters = parameters or {}
+    export_name = str(parameters.get("export_name") or "").strip()
+    if export_name and not export_name.lower().endswith(".xlsx"):
+        export_name = f"{export_name}.xlsx"
+    if not export_name:
+        export_name = f"{workflow_id}_result.xlsx"
+    output_path = Path(EXPORT_DIR) / export_name
     export_df = pd.DataFrame(
         [
             {

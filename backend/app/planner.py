@@ -3,6 +3,30 @@ from __future__ import annotations
 from typing import Any
 
 
+NODE_PROFILES = {
+    "upload_file": {
+        "description": "Collect the Excel file from the user.",
+        "purpose": "Provide source data for all downstream steps.",
+    },
+    "parse_excel": {
+        "description": "Read and parse the uploaded Excel file into a table.",
+        "purpose": "Expose columns and sample rows for later operations.",
+    },
+    "user_confirm": {
+        "description": "Ask the user to confirm ambiguous fields.",
+        "purpose": "Resolve uncertainty before executing numeric operations.",
+    },
+    "aggregate": {
+        "description": "Aggregate a selected numeric column.",
+        "purpose": "Compute the required summary metric (sum/mean/max/min/count).",
+    },
+    "export_excel": {
+        "description": "Export the final result into an Excel file.",
+        "purpose": "Deliver a downloadable output artifact for the workflow.",
+    },
+}
+
+
 GAP_TO_NODE_TYPE = {
     "need_input": "upload_file",
     "need_parse": "parse_excel",
@@ -29,10 +53,17 @@ def compute_gap(goal: dict[str, Any], state: dict[str, Any]) -> list[str]:
 
 def generate_node(gap: str, goal: dict[str, Any]) -> dict[str, Any]:
     node_type = GAP_TO_NODE_TYPE[gap]
+    profile = NODE_PROFILES.get(node_type, {"description": "", "purpose": ""})
+    base_parameters = {
+        "description": profile["description"],
+        "purpose": profile["purpose"],
+        "conversation": [],
+    }
     if node_type == "user_confirm":
         return {
             "type": node_type,
             "parameters": {
+                **base_parameters,
                 "message": "Please confirm which field should be aggregated.",
             },
         }
@@ -40,11 +71,12 @@ def generate_node(gap: str, goal: dict[str, Any]) -> dict[str, Any]:
         return {
             "type": node_type,
             "parameters": {
+                **base_parameters,
                 "field": goal.get("field"),
                 "method": goal.get("method", "sum"),
             },
         }
-    return {"type": node_type, "parameters": {}}
+    return {"type": node_type, "parameters": base_parameters}
 
 
 def build_initial_nodes(goal: dict[str, Any]) -> list[dict[str, Any]]:

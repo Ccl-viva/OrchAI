@@ -14,6 +14,12 @@ class ExecuteRequest(BaseModel):
     confirm_value: str | None = None
 
 
+class NodeChatRequest(BaseModel):
+    workflow_id: str
+    node_id: str
+    message: str = Field(..., min_length=1, description="Natural language instruction to modify node behavior")
+
+
 class Preview(BaseModel):
     type: str
     columns: list[str] = Field(default_factory=list)
@@ -67,3 +73,10 @@ class ExecuteResponse(BaseModel):
     workflow: WorkflowView
     events: list[ExecuteEvent] = Field(default_factory=list)
     pending_confirmation: PendingConfirmation | None = None
+
+
+class NodeChatResponse(BaseModel):
+    workflow: WorkflowView
+    node_id: str
+    reply: str
+    applied_updates: dict[str, Any] = Field(default_factory=dict)

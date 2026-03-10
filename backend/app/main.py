@@ -11,21 +11,27 @@ from fastapi.responses import FileResponse
 from .config import EXPORT_DIR, UPLOAD_DIR
 from .db import (
     create_workflow,
+    get_node,
     get_next_pending_node,
     get_node_by_type,
     get_workflow,
     init_db,
     log_execution,
+    reset_nodes_from,
     update_node,
+    update_node_data,
     update_workflow,
 )
 from .execution import execute_aggregate, execute_export_excel, execute_parse_excel
 from .goal_parser import parse_goal
+from .node_dialogue import apply_node_dialogue
 from .planner import build_initial_nodes
 from .schemas import (
     ExecuteEvent,
     ExecuteRequest,
     ExecuteResponse,
+    NodeChatRequest,
+    NodeChatResponse,
     PendingConfirmation,
     TaskCreateRequest,
     TaskCreateResponse,
@@ -64,6 +70,30 @@ def _pending_event(node: dict[str, Any], message: str) -> ExecuteEvent:
         status="waiting",
         message=message,
     )
+
+
+def _reset_state_from_node(node_type: str, state: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(state)
+    if node_type in {"parse_excel", "upload_file"}:
+        updated["columns"] = []
+        updated["preview"] = None
+        updated["selected_field"] = None
+        updated["aggregate_result"] = None
+        updated["exported_file"] = None
+        return updated
+    if node_type == "user_confirm":
+        updated["selected_field"] = None
+        updated["aggregate_result"] = None
+        updated["exported_file"] = None
+        return updated
+    if node_type == "aggregate":
+        updated["aggregate_result"] = None
+        updated["exported_file"] = None
+        return updated
+    if node_type == "export_excel":
+        updated["exported_file"] = None
+        return updated
+    return updated
 
 
 @app.get("/health")
@@ -127,6 +157,58 @@ def _confirm_field_value(options: list[str], value: str) -> str:
     raise HTTPException(status_code=400, detail=f"Invalid field '{value}', options: {options}")
 
 
+@app.post("/node/chat", response_model=NodeChatResponse)
+def node_chat(payload: NodeChatRequest) -> NodeChatResponse:
+    message_text = payload.message.strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    workflow = get_workflow(payload.workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+
+    node = get_node(payload.node_id)
+    if not node or node["workflow_id"] != payload.workflow_id:
+        raise HTTPException(status_code=404, detail="Node not found in this workflow.")
+
+    parameters, reply, applied_updates, state_patch, should_reset = apply_node_dialogue(
+        node=node,
+        workflow=workflow,
+        message=message_text,
+    )
+
+    update_node_data(node["id"], parameters=parameters)
+
+    state = dict(workflow["state"])
+    if state_patch:
+        state.update(state_patch)
+
+    if should_reset and node["status"] == "success":
+        state = _reset_state_from_node(node["type"], state)
+        reset_nodes_from(payload.workflow_id, node["order_index"])
+        update_workflow(payload.workflow_id, state=state, status="ready")
+    elif state_patch:
+        update_workflow(payload.workflow_id, state=state)
+
+    log_execution(
+        payload.workflow_id,
+        node["id"],
+        "info",
+        {"message": "Node dialogue update", "user_message": message_text, "reply": reply, "updates": applied_updates},
+    )
+
+    updated_workflow = get_workflow(payload.workflow_id)
+    if not updated_workflow:
+        raise HTTPException(status_code=500, detail="Workflow unavailable after node update.")
+
+    return NodeChatResponse(
+        workflow=_workflow_view(updated_workflow),
+        node_id=node["id"],
+        reply=reply,
+        applied_updates=applied_updates,
+    )
+
+
 @app.post("/workflow/execute", response_model=ExecuteResponse)
 def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
     workflow_id = payload.workflow_id
@@ -177,7 +259,7 @@ def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
 
         if node_type == "parse_excel":
             try:
-                state, result = execute_parse_excel(state)
+                state, result = execute_parse_excel(state, node.get("parameters", {}))
             except Exception as exc:
                 update_node(node["id"], status="failed")
                 update_workflow(workflow_id, status="failed")
@@ -199,7 +281,11 @@ def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
             continue
 
         if node_type == "user_confirm":
-            options = state.get("columns", [])
+            options_override = node["parameters"].get("options_override")
+            if isinstance(options_override, list) and options_override:
+                options = [str(item) for item in options_override]
+            else:
+                options = state.get("columns", [])
             current_selected = state.get("selected_field")
             message = node["parameters"].get("message", "Please select a field to continue.")
 
@@ -282,7 +368,7 @@ def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
 
         if node_type == "export_excel":
             try:
-                state, result = execute_export_excel(workflow_id, state)
+                state, result = execute_export_excel(workflow_id, state, node.get("parameters", {}))
             except Exception as exc:
                 update_node(node["id"], status="failed")
                 update_workflow(workflow_id, status="failed")

@@ -8,6 +8,11 @@ export interface WorkflowNode {
   parameters: Record<string, unknown>;
 }
 
+export interface NodeConversationMessage {
+  role: string;
+  content: string;
+}
+
 export interface PreviewData {
   type: string;
   columns: string[];
@@ -42,4 +47,11 @@ export interface ExecuteResponse {
   workflow: WorkflowData;
   events: ExecuteEvent[];
   pending_confirmation?: PendingConfirmation;
+}
+
+export interface NodeChatResponse {
+  workflow: WorkflowData;
+  node_id: string;
+  reply: string;
+  applied_updates: Record<string, unknown>;
 }

@@ -11,6 +11,11 @@ backend/storage/exports/*
 # Node
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/*.log
+backend/*.log
 
 # OS
 .DS_Store

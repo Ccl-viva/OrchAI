@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { ExecuteResponse, WorkflowData } from "./types";
+import type { ExecuteResponse, NodeChatResponse, WorkflowData } from "./types";
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE ?? "http://localhost:8000"
@@ -30,5 +30,14 @@ export async function executeWorkflow(workflowId: string, confirmValue?: string)
 
 export async function fetchWorkflow(workflowId: string): Promise<WorkflowData> {
   const response = await api.get(`/workflow/${workflowId}`);
+  return response.data;
+}
+
+export async function chatNode(workflowId: string, nodeId: string, message: string): Promise<NodeChatResponse> {
+  const response = await api.post("/node/chat", {
+    workflow_id: workflowId,
+    node_id: nodeId,
+    message
+  });
   return response.data;
 }
