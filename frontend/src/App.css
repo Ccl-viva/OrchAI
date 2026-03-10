@@ -1,0 +1,96 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap");
+
+:root {
+  --bg-1: #f3f6fa;
+  --bg-2: #dfe9f7;
+  --ink: #10243a;
+  --panel: #ffffffdd;
+  --line: #d4deea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: linear-gradient(115deg, var(--bg-1), var(--bg-2));
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+}
+
+.app-gradient {
+  position: absolute;
+  inset: -200px auto auto -120px;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffcc7a66 0%, #ffffff00 75%);
+  z-index: 0;
+}
+
+.app-header {
+  margin-bottom: 16px;
+  position: relative;
+  z-index: 1;
+}
+
+.panel-card {
+  border-radius: 16px !important;
+  border: 1px solid var(--line) !important;
+  background: var(--panel) !important;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 14px 28px rgba(23, 38, 54, 0.06);
+}
+
+.flow-wrap {
+  height: 380px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f9fbff;
+}
+
+.json-view {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f5f9ff;
+  border: 1px solid #dde6f2;
+  font-size: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.event-list {
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.event-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f9fbff;
+  border: 1px solid #e1e8f3;
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    padding: 14px;
+  }
+
+  .flow-wrap {
+    height: 320px;
+  }
+}

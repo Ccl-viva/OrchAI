@@ -1,0 +1,17 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/orchai_demo.db
+backend/storage/uploads/*
+backend/storage/exports/*
+!backend/storage/uploads/.gitkeep
+!backend/storage/exports/.gitkeep
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
