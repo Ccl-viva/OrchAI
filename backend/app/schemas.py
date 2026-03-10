@@ -43,8 +43,10 @@ class WorkflowView(BaseModel):
     id: str
     goal: str
     status: str
+    source_type: str = "excel"
     parsed_goal: dict[str, Any] = Field(default_factory=dict)
     state: dict[str, Any] = Field(default_factory=dict)
+    adapter_state: dict[str, Any] = Field(default_factory=dict)
     nodes: list[NodeView] = Field(default_factory=list)
     created_at: str
 

@@ -8,8 +8,11 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from .adapters.base import AdapterInputError, WorkflowAdapter
+from .adapters.registry import get_adapter, resolve_source_type
 from .config import EXPORT_DIR, UPLOAD_DIR
 from .db import (
+    add_node,
     create_workflow,
     get_node,
     get_next_pending_node,
@@ -22,10 +25,7 @@ from .db import (
     update_node_data,
     update_workflow,
 )
-from .execution import execute_aggregate, execute_export_excel, execute_parse_excel
 from .goal_parser import parse_goal
-from .node_dialogue import apply_node_dialogue
-from .planner import build_initial_nodes
 from .schemas import (
     ExecuteEvent,
     ExecuteRequest,
@@ -63,26 +63,15 @@ def _safe_filename(name: str) -> str:
     return "".join(char for char in name if char.isalnum() or char in {"-", "_", "."}) or "upload.xlsx"
 
 
-def _pending_event(node: dict[str, Any], message: str) -> ExecuteEvent:
-    return ExecuteEvent(
-        node_id=node["id"],
-        node_type=node["type"],
-        status="waiting",
-        message=message,
-    )
-
-
 def _reset_state_from_node(node_type: str, state: dict[str, Any]) -> dict[str, Any]:
     updated = dict(state)
     if node_type in {"parse_excel", "upload_file"}:
         updated["columns"] = []
         updated["preview"] = None
-        updated["selected_field"] = None
         updated["aggregate_result"] = None
         updated["exported_file"] = None
         return updated
     if node_type == "user_confirm":
-        updated["selected_field"] = None
         updated["aggregate_result"] = None
         updated["exported_file"] = None
         return updated
@@ -104,8 +93,16 @@ def health() -> dict[str, str]:
 @app.post("/task/create", response_model=TaskCreateResponse)
 def create_task(payload: TaskCreateRequest) -> TaskCreateResponse:
     parsed_goal = parse_goal(payload.goal)
-    nodes = build_initial_nodes(parsed_goal)
-    workflow_id = create_workflow(payload.goal, parsed_goal, nodes)
+    source_type = resolve_source_type(parsed_goal)
+    adapter = get_adapter(source_type)
+    nodes = adapter.build_initial_nodes(parsed_goal)
+    workflow_id = create_workflow(
+        payload.goal,
+        parsed_goal,
+        nodes,
+        source_type=source_type,
+        adapter_state=adapter.default_adapter_state(parsed_goal),
+    )
     workflow = get_workflow(workflow_id)
     if not workflow:
         raise HTTPException(status_code=500, detail="Failed to create workflow.")
@@ -117,10 +114,13 @@ def upload_file(workflow_id: str = Form(...), file: UploadFile = File(...)) -> U
     workflow = get_workflow(workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found.")
+    adapter = get_adapter(workflow.get("source_type"))
 
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".xlsx", ".xls"}:
-        raise HTTPException(status_code=400, detail="Only Excel files are supported.")
+    accepted_suffixes = adapter.accepted_file_suffixes
+    if accepted_suffixes and suffix not in accepted_suffixes:
+        expected = ", ".join(sorted(accepted_suffixes))
+        raise HTTPException(status_code=400, detail=f"Unsupported file type '{suffix}', expected: {expected}")
 
     file_name = f"{workflow_id}_{_safe_filename(file.filename or 'upload.xlsx')}"
     file_path = Path(UPLOAD_DIR) / file_name
@@ -142,19 +142,47 @@ def upload_file(workflow_id: str = Form(...), file: UploadFile = File(...)) -> U
             {"message": "File uploaded successfully.", "file_name": file.filename},
         )
 
-    updated = get_workflow(workflow_id)
-    if not updated:
-        raise HTTPException(status_code=500, detail="Workflow state unavailable after upload.")
+    updated = _refresh_with_next_node(workflow_id, adapter=adapter, default_status="ready")
     return UploadResponse(workflow_id=workflow_id, file_name=file.filename or file_name, workflow=_workflow_view(updated))
 
 
-def _confirm_field_value(options: list[str], value: str) -> str:
-    if value in options:
-        return value
-    lowered = {item.lower(): item for item in options}
-    if value.lower() in lowered:
-        return lowered[value.lower()]
-    raise HTTPException(status_code=400, detail=f"Invalid field '{value}', options: {options}")
+def _ensure_next_node(workflow: dict[str, Any], *, adapter: WorkflowAdapter) -> dict[str, Any] | None:
+    node = get_next_pending_node(workflow["id"])
+    if node:
+        return node
+
+    planned = adapter.plan_next_node(
+        workflow["parsed_goal"],
+        workflow["state"],
+        workflow.get("adapter_state", {}),
+    )
+    if not planned:
+        return None
+
+    node_id = add_node(workflow["id"], planned["type"], planned.get("parameters", {}), status="pending")
+    return get_node(node_id)
+
+
+def _refresh_with_next_node(
+    workflow_id: str,
+    *,
+    adapter: WorkflowAdapter,
+    default_status: str = "ready",
+) -> dict[str, Any]:
+    workflow = get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=500, detail="Workflow unavailable.")
+
+    next_node = _ensure_next_node(workflow, adapter=adapter)
+    if next_node is None:
+        update_workflow(workflow_id, status="completed")
+    else:
+        update_workflow(workflow_id, status=default_status)
+
+    updated = get_workflow(workflow_id)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Workflow unavailable.")
+    return updated
 
 
 @app.post("/node/chat", response_model=NodeChatResponse)
@@ -166,12 +194,13 @@ def node_chat(payload: NodeChatRequest) -> NodeChatResponse:
     workflow = get_workflow(payload.workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found.")
+    adapter = get_adapter(workflow.get("source_type"))
 
     node = get_node(payload.node_id)
     if not node or node["workflow_id"] != payload.workflow_id:
         raise HTTPException(status_code=404, detail="Node not found in this workflow.")
 
-    parameters, reply, applied_updates, state_patch, should_reset = apply_node_dialogue(
+    parameters, reply, applied_updates, state_patch, should_reset = adapter.apply_node_dialogue(
         node=node,
         workflow=workflow,
         message=message_text,
@@ -212,184 +241,76 @@ def node_chat(payload: NodeChatRequest) -> NodeChatResponse:
 @app.post("/workflow/execute", response_model=ExecuteResponse)
 def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
     workflow_id = payload.workflow_id
-    confirm_value = payload.confirm_value
     workflow = get_workflow(workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found.")
+    adapter = get_adapter(workflow.get("source_type"))
 
     events: list[ExecuteEvent] = []
     update_workflow(workflow_id, status="running")
 
-    while True:
-        workflow = get_workflow(workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=500, detail="Workflow lost during execution.")
+    workflow = get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=500, detail="Workflow lost during execution.")
 
-        node = get_next_pending_node(workflow_id)
-        if not node:
-            update_workflow(workflow_id, status="completed")
-            completed = get_workflow(workflow_id)
-            if not completed:
-                raise HTTPException(status_code=500, detail="Workflow completed but unavailable.")
-            return ExecuteResponse(workflow=_workflow_view(completed), events=events)
+    node = _ensure_next_node(workflow, adapter=adapter)
+    if not node:
+        update_workflow(workflow_id, status="completed")
+        completed = get_workflow(workflow_id)
+        if not completed:
+            raise HTTPException(status_code=500, detail="Workflow completed but unavailable.")
+        return ExecuteResponse(workflow=_workflow_view(completed), events=events)
 
-        state = workflow["state"]
-        node_type = node["type"]
+    try:
+        result = adapter.execute_node(
+            workflow_id=workflow_id,
+            node=node,
+            state=workflow["state"],
+            confirm_value=payload.confirm_value,
+        )
+    except AdapterInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        update_node(node["id"], status="failed")
+        update_workflow(workflow_id, status="failed")
+        log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
+        raise HTTPException(status_code=400, detail=f"{node['type']} failed: {exc}") from exc
 
-        if node_type == "upload_file":
-            if not state.get("uploaded_file"):
-                update_workflow(workflow_id, status="waiting_input")
-                refreshed = get_workflow(workflow_id)
-                if not refreshed:
-                    raise HTTPException(status_code=500, detail="Workflow unavailable.")
-                events.append(_pending_event(node, "Please upload an Excel file before execution."))
-                return ExecuteResponse(workflow=_workflow_view(refreshed), events=events)
-            update_node(node["id"], status="success")
-            log_execution(workflow_id, node["id"], "success", {"message": "Upload node auto-completed."})
-            events.append(
-                ExecuteEvent(
-                    node_id=node["id"],
-                    node_type=node_type,
-                    status="success",
-                    message="Upload node completed.",
-                )
-            )
-            continue
+    if result.node_status:
+        update_node(node["id"], status=result.node_status)
 
-        if node_type == "parse_excel":
-            try:
-                state, result = execute_parse_excel(state, node.get("parameters", {}))
-            except Exception as exc:
-                update_node(node["id"], status="failed")
-                update_workflow(workflow_id, status="failed")
-                log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
-                raise HTTPException(status_code=400, detail=f"Parse failed: {exc}") from exc
+    update_workflow(workflow_id, state=result.state, status=result.workflow_status)
 
-            update_workflow(workflow_id, state=state, status="running")
-            update_node(node["id"], status="success")
-            log_execution(workflow_id, node["id"], "success", result)
-            events.append(
-                ExecuteEvent(
-                    node_id=node["id"],
-                    node_type=node_type,
-                    status="success",
-                    message=result["message"],
-                    preview=result.get("preview"),
-                )
-            )
-            continue
+    if result.log_status:
+        payload_data = result.log_result or {"message": result.event.get("message", "") if result.event else ""}
+        log_execution(workflow_id, node["id"], result.log_status, payload_data)
 
-        if node_type == "user_confirm":
-            options_override = node["parameters"].get("options_override")
-            if isinstance(options_override, list) and options_override:
-                options = [str(item) for item in options_override]
-            else:
-                options = state.get("columns", [])
-            current_selected = state.get("selected_field")
-            message = node["parameters"].get("message", "Please select a field to continue.")
+    if result.event:
+        events.append(ExecuteEvent(**result.event))
 
-            if confirm_value:
-                selected = _confirm_field_value(options, confirm_value)
-                state["selected_field"] = selected
-                confirm_value = None
-                update_workflow(workflow_id, state=state, status="running")
-                update_node(node["id"], status="success")
-                result = {
-                    "message": f"User confirmed field: {selected}.",
-                    "payload": {"selected_field": selected},
-                }
-                log_execution(workflow_id, node["id"], "success", result)
-                events.append(
-                    ExecuteEvent(
-                        node_id=node["id"],
-                        node_type=node_type,
-                        status="success",
-                        message=result["message"],
-                        payload=result["payload"],
-                    )
-                )
-                continue
+    if result.pending_confirmation is not None:
+        pending = result.pending_confirmation
+        pending_message = str(pending.get("message", "Please confirm to continue."))
+        pending_options = [str(item) for item in pending.get("options", [])]
+        refreshed = get_workflow(workflow_id)
+        if not refreshed:
+            raise HTTPException(status_code=500, detail="Workflow unavailable.")
+        return ExecuteResponse(
+            workflow=_workflow_view(refreshed),
+            events=events,
+            pending_confirmation=PendingConfirmation(message=pending_message, options=pending_options),
+        )
 
-            if current_selected and current_selected in options:
-                update_node(node["id"], status="success")
-                result = {"message": f"Field already selected: {current_selected}."}
-                log_execution(workflow_id, node["id"], "success", result)
-                events.append(
-                    ExecuteEvent(
-                        node_id=node["id"],
-                        node_type=node_type,
-                        status="success",
-                        message=result["message"],
-                        payload={"selected_field": current_selected},
-                    )
-                )
-                continue
+    if result.advance:
+        next_status = result.workflow_status if result.workflow_status not in {"running"} else "ready"
+        updated = _refresh_with_next_node(workflow_id, adapter=adapter, default_status=next_status)
+    else:
+        updated = get_workflow(workflow_id)
+        if not updated:
+            raise HTTPException(status_code=500, detail="Workflow unavailable.")
 
-            update_workflow(workflow_id, status="waiting_confirmation")
-            log_execution(
-                workflow_id,
-                node["id"],
-                "waiting",
-                {"message": message, "options": options},
-            )
-            refreshed = get_workflow(workflow_id)
-            if not refreshed:
-                raise HTTPException(status_code=500, detail="Workflow unavailable.")
-            return ExecuteResponse(
-                workflow=_workflow_view(refreshed),
-                events=events,
-                pending_confirmation=PendingConfirmation(message=message, options=options),
-            )
-
-        if node_type == "aggregate":
-            try:
-                state, result = execute_aggregate(state, node["parameters"])
-            except Exception as exc:
-                update_node(node["id"], status="failed")
-                update_workflow(workflow_id, status="failed")
-                log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
-                raise HTTPException(status_code=400, detail=f"Aggregate failed: {exc}") from exc
-
-            update_workflow(workflow_id, state=state, status="running")
-            update_node(node["id"], status="success")
-            log_execution(workflow_id, node["id"], "success", result)
-            events.append(
-                ExecuteEvent(
-                    node_id=node["id"],
-                    node_type=node_type,
-                    status="success",
-                    message=result["message"],
-                    preview=result.get("preview"),
-                    payload=result.get("result", {}),
-                )
-            )
-            continue
-
-        if node_type == "export_excel":
-            try:
-                state, result = execute_export_excel(workflow_id, state, node.get("parameters", {}))
-            except Exception as exc:
-                update_node(node["id"], status="failed")
-                update_workflow(workflow_id, status="failed")
-                log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
-                raise HTTPException(status_code=400, detail=f"Export failed: {exc}") from exc
-
-            update_workflow(workflow_id, state=state, status="running")
-            update_node(node["id"], status="success")
-            log_execution(workflow_id, node["id"], "success", result)
-            events.append(
-                ExecuteEvent(
-                    node_id=node["id"],
-                    node_type=node_type,
-                    status="success",
-                    message=result["message"],
-                    payload=result.get("payload", {}),
-                )
-            )
-            continue
-
-        raise HTTPException(status_code=400, detail=f"Unsupported node type: {node_type}")
+    return ExecuteResponse(workflow=_workflow_view(updated), events=events)
 
 
 @app.get("/workflow/{workflow_id}", response_model=WorkflowView)

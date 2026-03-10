@@ -33,6 +33,7 @@ def _fallback_parse(goal: str) -> dict[str, Any]:
 
     return {
         "input_type": input_type,
+        "source_type": "excel" if input_type == "excel" else "table",
         "operation": operation,
         "field": field,
         "method": method,
@@ -56,7 +57,7 @@ def parse_goal(goal: str) -> dict[str, Any]:
 
     prompt = (
         "将用户任务解析为JSON，字段必须包含："
-        "input_type, operation, field, method, output。"
+        "input_type, source_type, operation, field, method, output。"
         "只输出JSON对象，不要解释。"
     )
 
@@ -75,6 +76,8 @@ def parse_goal(goal: str) -> dict[str, Any]:
         required = {"input_type", "operation", "field", "method", "output"}
         if not required.issubset(set(parsed.keys())):
             return _fallback_parse(goal)
+        if "source_type" not in parsed:
+            parsed["source_type"] = "excel" if parsed.get("input_type") == "excel" else "table"
         return parsed
     except Exception:
         return _fallback_parse(goal)

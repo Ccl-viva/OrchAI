@@ -40,7 +40,7 @@ def execute_parse_excel(
         raise ValueError("File is not uploaded yet.")
 
     parameters = parameters or {}
-    sheet_name = parameters.get("sheet_name")
+    sheet_name = parameters.get("sheet_name", state.get("parse_sheet"))
     read_kwargs: dict[str, Any] = {}
     if isinstance(sheet_name, (str, int)):
         read_kwargs["sheet_name"] = sheet_name
@@ -60,6 +60,8 @@ def execute_parse_excel(
 
 def _normalize_method(method: str | None) -> str:
     raw = (method or "sum").strip().lower()
+    if raw in {"", "none", "null"}:
+        return "sum"
     if raw in {"avg", "average"}:
         return "mean"
     return raw
@@ -82,7 +84,8 @@ def _apply_aggregation(series: pd.Series, method: str) -> float:
 def execute_aggregate(state: dict[str, Any], parameters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     uploaded_file = state.get("uploaded_file")
     field = state.get("selected_field") or parameters.get("field")
-    method = _normalize_method(str(parameters.get("method", "sum")))
+    method_source = state.get("selected_method") or parameters.get("method") or "sum"
+    method = _normalize_method(str(method_source))
 
     if not uploaded_file:
         raise ValueError("File is not uploaded yet.")
@@ -103,6 +106,7 @@ def execute_aggregate(state: dict[str, Any], parameters: dict[str, Any]) -> tupl
     }
 
     state["selected_field"] = resolved_field
+    state["selected_method"] = method
     state["aggregate_result"] = {
         "field": resolved_field,
         "method": method,
@@ -127,7 +131,7 @@ def execute_export_excel(
         raise ValueError("No aggregation result to export.")
 
     parameters = parameters or {}
-    export_name = str(parameters.get("export_name") or "").strip()
+    export_name = str(parameters.get("export_name") or state.get("export_name") or "").strip()
     if export_name and not export_name.lower().endswith(".xlsx"):
         export_name = f"{export_name}.xlsx"
     if not export_name:
@@ -145,6 +149,7 @@ def execute_export_excel(
     export_df.to_excel(output_path, index=False)
 
     state["exported_file"] = str(output_path)
+    state["export_name"] = export_name
     return state, {
         "message": "Result exported successfully.",
         "payload": {

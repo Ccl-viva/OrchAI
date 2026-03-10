@@ -65,6 +65,9 @@ const NODE_DETAILS: Record<string, { description: string; purpose: string }> = {
 };
 
 type NodePosition = { x: number; y: number };
+type PreviewCellCoord = { row: number; col: number };
+type PreviewSelection = { rowStart: number; rowEnd: number; colStart: number; colEnd: number };
+type PreviewTableRow = { key: string } & Record<string, string | number>;
 
 type FlowNodeData = {
   id: string;
@@ -157,6 +160,37 @@ function readConversation(parameters: Record<string, unknown>): NodeConversation
   return messages.slice(-8);
 }
 
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const values: string[] = [];
+  for (const item of value) {
+    const text = String(item ?? "").trim();
+    if (text) {
+      values.push(text);
+    }
+  }
+  return values;
+}
+
+function buildConfirmFromNode(node: WorkflowNode | null, workflow: WorkflowData | null): PendingConfirmation | null {
+  if (!node || node.type !== "user_confirm" || node.status !== "pending") {
+    return null;
+  }
+
+  const parameters = node.parameters as Record<string, unknown>;
+  const messageText = readStringParam(parameters, "message", "Please select a field to continue.");
+  const overrideOptions = readStringArray(parameters.options_override);
+  const stateColumns = readStringArray(workflow?.state?.columns);
+  const options = overrideOptions.length > 0 ? overrideOptions : stateColumns;
+
+  return {
+    message: messageText,
+    options
+  };
+}
+
 function GoalNode({ data }: NodeProps<FlowNodeData>) {
   return (
     <div className={`rf-goal-node ${data.selected ? "rf-goal-selected" : ""}`}>
@@ -233,13 +267,22 @@ function StepNode({ data }: NodeProps<FlowNodeData>) {
 
         {data.confirm && data.nodeType === "user_confirm" && (
           <div className="nodrag nopan rf-step-action-stack">
+            <Text type="secondary">{data.confirm.message}</Text>
             <Select
               size="small"
-              value={data.confirmValue}
+              value={data.confirmValue || undefined}
               onChange={data.onConfirmChange}
               options={data.confirm.options.map((option) => ({ value: option, label: option }))}
+              placeholder="Choose a field"
+              disabled={data.confirm.options.length === 0}
             />
-            <Button size="small" type="primary" onClick={data.onConfirmSubmit} loading={data.confirmLoading}>
+            <Button
+              size="small"
+              type="primary"
+              onClick={data.onConfirmSubmit}
+              loading={data.confirmLoading}
+              disabled={!data.confirmValue}
+            >
               Confirm
             </Button>
           </div>
@@ -290,6 +333,10 @@ const nodeTypes = {
   step: StepNode
 };
 
+const SIDEBAR_DEFAULT_WIDTH = 360;
+const SIDEBAR_MIN_WIDTH = 280;
+const SIDEBAR_MAX_WIDTH = 640;
+
 function defaultPosition(index: number): NodePosition {
   return {
     x: 460 + index * 295,
@@ -309,6 +356,12 @@ export default function App() {
   const [submittingConfirm, setSubmittingConfirm] = useState(false);
   const [chattingNodeId, setChattingNodeId] = useState<string | null>(null);
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState<FlowNodeData>([]);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
+  const [previewDragActive, setPreviewDragActive] = useState(false);
+  const [previewDragStart, setPreviewDragStart] = useState<PreviewCellCoord | null>(null);
+  const [previewDragEnd, setPreviewDragEnd] = useState<PreviewCellCoord | null>(null);
 
   const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
   const preview = useMemo(() => findLatestPreview(events, workflow), [events, workflow]);
@@ -321,6 +374,12 @@ export default function App() {
   }, [workflow]);
 
   const nextPendingNode = useMemo(() => orderedNodes.find((node) => node.status === "pending") ?? null, [orderedNodes]);
+  const activeConfirm = useMemo(() => {
+    if (!nextPendingNode || nextPendingNode.type !== "user_confirm") {
+      return null;
+    }
+    return pendingConfirm ?? buildConfirmFromNode(nextPendingNode, workflow);
+  }, [nextPendingNode, pendingConfirm, workflow]);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) {
@@ -329,6 +388,79 @@ export default function App() {
     return orderedNodes.find((item) => item.id === selectedNodeId) ?? null;
   }, [orderedNodes, selectedNodeId]);
 
+  const canDragSelectInPreview = useMemo(() => {
+    return Boolean(activeConfirm && preview && preview.columns.length > 0 && preview.rows.length > 0);
+  }, [activeConfirm, preview]);
+
+  const previewSelection = useMemo<PreviewSelection | null>(() => {
+    if (!previewDragStart || !previewDragEnd) {
+      return null;
+    }
+    return {
+      rowStart: Math.min(previewDragStart.row, previewDragEnd.row),
+      rowEnd: Math.max(previewDragStart.row, previewDragEnd.row),
+      colStart: Math.min(previewDragStart.col, previewDragEnd.col),
+      colEnd: Math.max(previewDragStart.col, previewDragEnd.col)
+    };
+  }, [previewDragEnd, previewDragStart]);
+
+  const previewSelectedColumns = useMemo<string[]>(() => {
+    if (!previewSelection || !preview) {
+      return [];
+    }
+    return preview.columns.slice(previewSelection.colStart, previewSelection.colEnd + 1);
+  }, [preview, previewSelection]);
+
+  const previewResolvedConfirmValue = useMemo(() => {
+    if (!activeConfirm || previewSelectedColumns.length !== 1) {
+      return "";
+    }
+    const selectedColumn = previewSelectedColumns[0];
+    const exact = activeConfirm.options.find((option) => option === selectedColumn);
+    if (exact) {
+      return exact;
+    }
+    const lower = activeConfirm.options.find((option) => option.toLowerCase() === selectedColumn.toLowerCase());
+    return lower ?? "";
+  }, [activeConfirm, previewSelectedColumns]);
+
+  useEffect(() => {
+    if (!activeConfirm) {
+      return;
+    }
+    if (activeConfirm.options.length === 0) {
+      setConfirmValue("");
+      return;
+    }
+    if (!confirmValue || !activeConfirm.options.includes(confirmValue)) {
+      setConfirmValue(activeConfirm.options[0]);
+    }
+  }, [activeConfirm, confirmValue]);
+
+  useEffect(() => {
+    if (!previewDragActive) {
+      return;
+    }
+    const handleMouseUp = () => setPreviewDragActive(false);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => window.removeEventListener("mouseup", handleMouseUp);
+  }, [previewDragActive]);
+
+  useEffect(() => {
+    if (!previewResolvedConfirmValue) {
+      return;
+    }
+    if (confirmValue !== previewResolvedConfirmValue) {
+      setConfirmValue(previewResolvedConfirmValue);
+    }
+  }, [confirmValue, previewResolvedConfirmValue]);
+
+  useEffect(() => {
+    setPreviewDragActive(false);
+    setPreviewDragStart(null);
+    setPreviewDragEnd(null);
+  }, [activeConfirm, preview?.columns, preview?.rows]);
+
   async function handleNodeUpload(file: File) {
     if (!workflow) {
       message.error("Create a task first.");
@@ -336,6 +468,7 @@ export default function App() {
     }
     const result = await uploadTaskFile(workflow.id, file);
     setWorkflow(result.workflow);
+    setPendingConfirm(null);
     message.success("Upload complete.");
   }
 
@@ -375,6 +508,7 @@ export default function App() {
     try {
       const result = await chatNode(workflow.id, nodeId, text);
       setWorkflow(result.workflow);
+      setPendingConfirm(null);
       if (Object.keys(result.applied_updates).length > 0) {
         message.success(result.reply);
       } else {
@@ -434,6 +568,56 @@ export default function App() {
     setFlowNodes([]);
   }
 
+  function startSidebarResize(event: React.MouseEvent<HTMLButtonElement>) {
+    if (sidebarCollapsed) {
+      return;
+    }
+
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    setResizingSidebar(true);
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const delta = startX - moveEvent.clientX;
+      const nextWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + delta));
+      setSidebarWidth(nextWidth);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizingSidebar(false);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function beginPreviewDrag(event: React.MouseEvent<HTMLElement>, row: number, col: number) {
+    if (!canDragSelectInPreview) {
+      return;
+    }
+    event.preventDefault();
+    setPreviewDragActive(true);
+    setPreviewDragStart({ row, col });
+    setPreviewDragEnd({ row, col });
+  }
+
+  function movePreviewDrag(row: number, col: number) {
+    if (!previewDragActive) {
+      return;
+    }
+    setPreviewDragEnd({ row, col });
+  }
+
+  function isPreviewCellSelected(row: number, col: number): boolean {
+    if (!previewSelection) {
+      return false;
+    }
+    return row >= previewSelection.rowStart && row <= previewSelection.rowEnd && col >= previewSelection.colStart && col <= previewSelection.colEnd;
+  }
+
   useEffect(() => {
     if (!workflow) {
       setFlowNodes([]);
@@ -490,7 +674,7 @@ export default function App() {
             canExecute: isCurrent && !isUpload && !isConfirm && node.status === "pending" && !pendingConfirm,
             running: runningWorkflow,
             onExecute: () => runWorkflow(),
-            confirm: isCurrent && isConfirm ? pendingConfirm : null,
+            confirm: isCurrent && isConfirm ? activeConfirm : null,
             confirmValue,
             onConfirmChange: setConfirmValue,
             onConfirmSubmit: submitConfirmation,
@@ -559,18 +743,42 @@ export default function App() {
     return edges;
   }, [workflow, orderedNodes]);
 
-  const tableColumns = (preview?.columns ?? []).map((column) => ({
+  const tableColumns = (preview?.columns ?? []).map((column, columnIndex) => ({
     title: column,
     dataIndex: column,
-    key: column
+    key: column,
+    className:
+      previewSelection && columnIndex >= previewSelection.colStart && columnIndex <= previewSelection.colEnd
+        ? "preview-col-selected"
+        : undefined,
+    onCell: (_record: PreviewTableRow, rowIndex?: number) => {
+      const safeRowIndex = typeof rowIndex === "number" ? rowIndex : -1;
+      const selected = safeRowIndex >= 0 && isPreviewCellSelected(safeRowIndex, columnIndex);
+      return {
+        className: selected ? "preview-cell-selected" : canDragSelectInPreview ? "preview-cell-selectable" : undefined,
+        onMouseDown: (event: React.MouseEvent<HTMLElement>) => {
+          if (safeRowIndex >= 0) {
+            beginPreviewDrag(event, safeRowIndex, columnIndex);
+          }
+        },
+        onMouseEnter: () => {
+          if (safeRowIndex >= 0) {
+            movePreviewDrag(safeRowIndex, columnIndex);
+          }
+        },
+        onMouseUp: () => {
+          setPreviewDragActive(false);
+        }
+      };
+    }
   }));
 
   const tableData = (preview?.rows ?? []).map((row, index) => {
-    const item: Record<string, string | number> = {};
+    const item: PreviewTableRow = { key: `${index}` };
     (preview?.columns ?? []).forEach((column, columnIndex) => {
       item[column] = row[columnIndex] ?? "";
     });
-    return { key: `${index}`, ...item };
+    return item;
   });
 
   const sidebarItems = [
@@ -578,52 +786,74 @@ export default function App() {
       key: "preview",
       label: "Preview",
       children: preview ? (
-        <Table pagination={false} columns={tableColumns} dataSource={tableData} size="small" scroll={{ x: true }} />
+        <div className="sidebar-panel preview-panel">
+          {activeConfirm && (
+            <Text type="secondary" className="preview-drag-hint">
+              拖动选择一列可直接填入确认字段。
+            </Text>
+          )}
+          <Table
+            pagination={false}
+            columns={tableColumns}
+            dataSource={tableData}
+            size="small"
+            scroll={{ x: true, y: 430 }}
+            className={`preview-table${canDragSelectInPreview ? " preview-table-draggable" : ""}`}
+          />
+        </div>
       ) : (
-        <Text type="secondary">Preview appears after node execution.</Text>
+        <div className="sidebar-panel">
+          <Text type="secondary">Preview appears after node execution.</Text>
+        </div>
       )
     },
     {
       key: "node",
       label: "Node",
       children: selectedNode ? (
-        <Space direction="vertical" style={{ width: "100%" }}>
-          <Space>
-            <Text strong>{NODE_LABELS[selectedNode.type] ?? selectedNode.type}</Text>
-            <Tag color={selectedNode.status === "success" ? "green" : selectedNode.status === "failed" ? "red" : "blue"}>
-              {statusText(selectedNode.status)}
-            </Tag>
+        <div className="sidebar-panel">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Space>
+              <Text strong>{NODE_LABELS[selectedNode.type] ?? selectedNode.type}</Text>
+              <Tag color={selectedNode.status === "success" ? "green" : selectedNode.status === "failed" ? "red" : "blue"}>
+                {statusText(selectedNode.status)}
+              </Tag>
+            </Space>
+            <pre className="json-view">{JSON.stringify(selectedNode.parameters, null, 2)}</pre>
           </Space>
-          <pre className="json-view">{JSON.stringify(selectedNode.parameters, null, 2)}</pre>
-        </Space>
+        </div>
       ) : (
-        <Text type="secondary">Click a node in canvas for details.</Text>
+        <div className="sidebar-panel">
+          <Text type="secondary">Click a node in canvas for details.</Text>
+        </div>
       )
     },
     {
       key: "events",
       label: "Logs",
       children: (
-        <div className="event-list">
-          {events.length === 0 ? (
-            <Text type="secondary">No logs yet.</Text>
-          ) : (
-            events.map((event, index) => (
-              <div className="event-item" key={`${event.node_id}-${index}`}>
-                <Tag color={event.status === "success" ? "green" : event.status === "failed" ? "red" : "orange"}>
-                  {NODE_LABELS[event.node_type] ?? event.node_type}
-                </Tag>
-                <Text>{event.message}</Text>
-              </div>
-            ))
-          )}
+        <div className="sidebar-panel">
+          <div className="event-list">
+            {events.length === 0 ? (
+              <Text type="secondary">No logs yet.</Text>
+            ) : (
+              events.map((event, index) => (
+                <div className="event-item" key={`${event.node_id}-${index}`}>
+                  <Tag color={event.status === "success" ? "green" : event.status === "failed" ? "red" : "orange"}>
+                    {NODE_LABELS[event.node_type] ?? event.node_type}
+                  </Tag>
+                  <Text>{event.message}</Text>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )
     }
   ];
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${resizingSidebar ? " is-resizing-sidebar" : ""}`}>
       <header className="header-bar">
         <div className="header-main">
           <div>
@@ -682,9 +912,30 @@ export default function App() {
             </div>
           </main>
 
-          <aside className="right-sidebar">
-            <Tabs size="small" items={sidebarItems} />
-          </aside>
+          {sidebarCollapsed ? (
+            <div className="sidebar-collapsed">
+              <Button size="small" onClick={() => setSidebarCollapsed(false)}>
+                Show Panel
+              </Button>
+            </div>
+          ) : (
+            <div className="right-pane" style={{ width: sidebarWidth }}>
+              <button
+                type="button"
+                className="sidebar-resizer"
+                onMouseDown={startSidebarResize}
+                aria-label="Resize sidebar"
+              />
+              <aside className="right-sidebar">
+                <div className="sidebar-toolbar">
+                  <Button size="small" onClick={() => setSidebarCollapsed(true)}>
+                    Hide
+                  </Button>
+                </div>
+                <Tabs size="small" items={sidebarItems} />
+              </aside>
+            </div>
+          )}
         </section>
       )}
     </div>

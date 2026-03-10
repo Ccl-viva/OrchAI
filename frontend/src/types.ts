@@ -23,8 +23,10 @@ export interface WorkflowData {
   id: string;
   goal: string;
   status: string;
+  source_type?: string;
   parsed_goal: Record<string, unknown>;
   state: Record<string, unknown>;
+  adapter_state?: Record<string, unknown>;
   nodes: WorkflowNode[];
   created_at: string;
 }
