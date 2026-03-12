@@ -19,11 +19,25 @@ export interface PreviewData {
   rows: Array<Array<string | number>>;
 }
 
+export interface LlmSettingsInput {
+  provider: string;
+  model?: string;
+  api_key?: string;
+}
+
+export interface LlmSettingsView {
+  provider: string;
+  model?: string;
+  enabled: boolean;
+  source: string;
+}
+
 export interface WorkflowData {
   id: string;
   goal: string;
   status: string;
   source_type?: string;
+  llm_settings?: LlmSettingsView;
   parsed_goal: Record<string, unknown>;
   state: Record<string, unknown>;
   adapter_state?: Record<string, unknown>;

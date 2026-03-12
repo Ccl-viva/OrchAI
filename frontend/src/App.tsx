@@ -430,6 +430,9 @@ function defaultPosition(index: number): NodePosition {
 
 export default function App() {
   const [goal, setGoal] = useState("Sum price from an Excel file");
+  const [llmProvider, setLlmProvider] = useState("openai");
+  const [llmModel, setLlmModel] = useState("gpt-4.1-mini");
+  const [llmApiKey, setLlmApiKey] = useState("");
   const [workflow, setWorkflow] = useState<WorkflowData | null>(null);
   const [events, setEvents] = useState<ExecuteEvent[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -748,14 +751,18 @@ export default function App() {
 
     setCreatingTask(true);
     try {
-      const created = await createTask(goal.trim());
+      const created = await createTask(goal.trim(), {
+        provider: llmProvider,
+        model: llmModel.trim() || undefined,
+        api_key: llmApiKey.trim() || undefined
+      });
       setWorkflow(created.workflow);
       setEvents([]);
       setPendingConfirm(null);
       setConfirmValue("");
       setChattingNodeId(null);
       setSelectedNodeId("goal");
-      message.success("Moved into canvas.");
+      message.success(created.workflow.llm_settings?.enabled ? "Moved into canvas with live AI planning." : "Moved into canvas.");
     } catch (error) {
       message.error(`Create failed: ${String(error)}`);
     } finally {
@@ -860,6 +867,9 @@ export default function App() {
             : activeConfirm
               ? "Only the ambiguous decision is surfaced here."
               : "The system is handling internal steps in the background.";
+      const llmSummary = workflow.llm_settings?.enabled
+        ? `${workflow.llm_settings.provider}:${workflow.llm_settings.model ?? ""}`.replace(/:$/, "")
+        : "rule planner";
       const nodes: Node<FlowNodeData>[] = [
         {
           id: "goal",
@@ -875,7 +885,7 @@ export default function App() {
             status: "success",
             selected: selectedNodeId === "goal",
             goalStatus,
-            goalHint,
+            goalHint: `${goalHint} Using ${llmSummary}.`,
             canUpload: uploadNodePending,
             onUpload: handleNodeUpload,
             running: runningWorkflow,
@@ -1148,6 +1158,9 @@ export default function App() {
               <Text strong>Goal</Text>
               <Tag color={workflow.status === "completed" ? "green" : "blue"}>{workflow.status}</Tag>
             </Space>
+            <Text type="secondary">
+              LLM: {workflow.llm_settings?.enabled ? `${workflow.llm_settings.provider} / ${workflow.llm_settings.model}` : "Rule fallback"}
+            </Text>
             <pre className="json-view">{JSON.stringify(workflow.parsed_goal, null, 2)}</pre>
           </Space>
         </div>
@@ -1222,6 +1235,21 @@ export default function App() {
               rows={4}
               placeholder="Example: Sum price from an Excel file"
             />
+            <div className="entry-llm-settings">
+              <Text className="entry-settings-title">AI Settings</Text>
+              <Select value={llmProvider} onChange={setLlmProvider} options={[{ value: "openai", label: "OpenAI" }]} />
+              <Input
+                value={llmModel}
+                onChange={(event) => setLlmModel(event.target.value)}
+                placeholder="Model, for example gpt-4.1-mini"
+              />
+              <Input.Password
+                value={llmApiKey}
+                onChange={(event) => setLlmApiKey(event.target.value)}
+                placeholder="API key for live planning, optional if server has a default key"
+              />
+              <Text type="secondary">If no key is provided, the system uses the server key when available, otherwise it falls back to rule-based parsing.</Text>
+            </div>
             <Button type="primary" size="large" loading={creatingTask} onClick={handleCreateTask}>
               Enter Canvas
             </Button>

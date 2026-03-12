@@ -26,6 +26,7 @@ from .db import (
     update_workflow,
 )
 from .goal_parser import parse_goal
+from .llm.service import cache_workflow_runtime, generate_clarification_message, resolve_requested_llm
 from .schemas import (
     ExecuteEvent,
     ExecuteRequest,
@@ -92,7 +93,8 @@ def health() -> dict[str, str]:
 
 @app.post("/task/create", response_model=TaskCreateResponse)
 def create_task(payload: TaskCreateRequest) -> TaskCreateResponse:
-    parsed_goal = parse_goal(payload.goal)
+    llm_settings, llm_runtime = resolve_requested_llm(payload.llm.model_dump() if payload.llm else None)
+    parsed_goal = parse_goal(payload.goal, llm_runtime)
     source_type = resolve_source_type(parsed_goal)
     adapter = get_adapter(source_type)
     nodes = adapter.build_initial_nodes(parsed_goal)
@@ -101,8 +103,10 @@ def create_task(payload: TaskCreateRequest) -> TaskCreateResponse:
         parsed_goal,
         nodes,
         source_type=source_type,
+        llm_settings=llm_settings,
         adapter_state=adapter.default_adapter_state(parsed_goal),
     )
+    cache_workflow_runtime(workflow_id, llm_settings, llm_runtime)
     workflow = get_workflow(workflow_id)
     if not workflow:
         raise HTTPException(status_code=500, detail="Failed to create workflow.")
@@ -158,6 +162,35 @@ def _ensure_next_node(workflow: dict[str, Any], *, adapter: WorkflowAdapter) -> 
     )
     if not planned:
         return None
+
+    if planned["type"] == "user_confirm":
+        parameters = dict(planned.get("parameters", {}))
+        options_raw = parameters.get("options_override")
+        if isinstance(options_raw, list) and options_raw:
+            options = [str(item) for item in options_raw]
+        else:
+            options = [str(item) for item in workflow["state"].get("columns", [])]
+        llm_state = {
+            "has_uploaded_file": bool(workflow["state"].get("uploaded_file")),
+            "columns": workflow["state"].get("columns", []),
+            "selected_field": workflow["state"].get("selected_field"),
+            "selected_method": workflow["state"].get("selected_method"),
+            "parse_sheet": workflow["state"].get("parse_sheet"),
+            "parse_delimiter": workflow["state"].get("parse_delimiter"),
+        }
+
+        llm_message = generate_clarification_message(
+            workflow_id=workflow["id"],
+            llm_settings=workflow.get("llm_settings", {}),
+            goal=workflow["goal"],
+            parsed_goal=workflow["parsed_goal"],
+            state=llm_state,
+            node_parameters=parameters,
+            options=options,
+        )
+        if llm_message:
+            parameters["message"] = llm_message
+            planned = {**planned, "parameters": parameters}
 
     node_id = add_node(workflow["id"], planned["type"], planned.get("parameters", {}), status="pending")
     return get_node(node_id)

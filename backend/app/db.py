@@ -43,6 +43,7 @@ def init_db() -> None:
                     goal TEXT NOT NULL,
                     status TEXT NOT NULL,
                     source_type TEXT NOT NULL DEFAULT 'excel',
+                    llm_settings TEXT NOT NULL DEFAULT '{}',
                     parsed_goal TEXT NOT NULL,
                     state TEXT NOT NULL,
                     adapter_state TEXT NOT NULL DEFAULT '{}',
@@ -72,6 +73,8 @@ def init_db() -> None:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(workflow)").fetchall()}
             if "source_type" not in columns:
                 conn.execute("ALTER TABLE workflow ADD COLUMN source_type TEXT NOT NULL DEFAULT 'excel'")
+            if "llm_settings" not in columns:
+                conn.execute("ALTER TABLE workflow ADD COLUMN llm_settings TEXT NOT NULL DEFAULT '{}'")
             if "adapter_state" not in columns:
                 conn.execute("ALTER TABLE workflow ADD COLUMN adapter_state TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
@@ -85,6 +88,7 @@ def create_workflow(
     nodes: list[dict[str, Any]],
     *,
     source_type: str = "excel",
+    llm_settings: dict[str, Any] | None = None,
     adapter_state: dict[str, Any] | None = None,
 ) -> str:
     workflow_id = str(uuid.uuid4())
@@ -117,14 +121,15 @@ def create_workflow(
         try:
             conn.execute(
                 """
-                INSERT INTO workflow (id, goal, status, source_type, parsed_goal, state, adapter_state, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workflow (id, goal, status, source_type, llm_settings, parsed_goal, state, adapter_state, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workflow_id,
                     goal,
                     "created",
                     source_type,
+                    _dumps(llm_settings or {}),
                     _dumps(parsed_goal),
                     _dumps(initial_state),
                     _dumps(adapter_state or {}),
@@ -208,7 +213,7 @@ def get_workflow(workflow_id: str) -> dict[str, Any] | None:
     try:
         row = conn.execute(
             """
-            SELECT id, goal, status, source_type, parsed_goal, state, adapter_state, created_at
+            SELECT id, goal, status, source_type, llm_settings, parsed_goal, state, adapter_state, created_at
             FROM workflow
             WHERE id = ?
             """,
@@ -221,6 +226,7 @@ def get_workflow(workflow_id: str) -> dict[str, Any] | None:
             "goal": row["goal"],
             "status": row["status"],
             "source_type": row["source_type"],
+            "llm_settings": _loads(row["llm_settings"]),
             "parsed_goal": _loads(row["parsed_goal"]),
             "state": _loads(row["state"]),
             "adapter_state": _loads(row["adapter_state"]),
@@ -235,10 +241,11 @@ def update_workflow(
     workflow_id: str,
     *,
     status: str | None = None,
+    llm_settings: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     adapter_state: dict[str, Any] | None = None,
 ) -> None:
-    if status is None and state is None and adapter_state is None:
+    if status is None and llm_settings is None and state is None and adapter_state is None:
         return
 
     with _DB_LOCK:
@@ -250,6 +257,9 @@ def update_workflow(
             if status is not None:
                 assignments.append("status = ?")
                 values.append(status)
+            if llm_settings is not None:
+                assignments.append("llm_settings = ?")
+                values.append(_dumps(llm_settings))
             if state is not None:
                 assignments.append("state = ?")
                 values.append(_dumps(state))

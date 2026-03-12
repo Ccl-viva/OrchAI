@@ -1,12 +1,12 @@
 import axios from "axios";
-import type { ExecuteResponse, NodeChatResponse, WorkflowData } from "./types";
+import type { ExecuteResponse, LlmSettingsInput, NodeChatResponse, WorkflowData } from "./types";
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE ?? "http://localhost:8000"
 });
 
-export async function createTask(goal: string): Promise<{ workflow_id: string; workflow: WorkflowData }> {
-  const response = await api.post("/task/create", { goal });
+export async function createTask(goal: string, llm?: LlmSettingsInput): Promise<{ workflow_id: string; workflow: WorkflowData }> {
+  const response = await api.post("/task/create", { goal, llm });
   return response.data;
 }
 

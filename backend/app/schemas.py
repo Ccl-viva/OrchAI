@@ -5,8 +5,22 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class LLMSettingsInput(BaseModel):
+    provider: str = Field(default="openai")
+    model: str | None = None
+    api_key: str | None = None
+
+
+class LLMSettingsView(BaseModel):
+    provider: str = "openai"
+    model: str | None = None
+    enabled: bool = False
+    source: str = "rules"
+
+
 class TaskCreateRequest(BaseModel):
     goal: str = Field(..., min_length=2, description="User goal in natural language")
+    llm: LLMSettingsInput | None = None
 
 
 class ExecuteRequest(BaseModel):
@@ -44,6 +58,7 @@ class WorkflowView(BaseModel):
     goal: str
     status: str
     source_type: str = "excel"
+    llm_settings: LLMSettingsView = Field(default_factory=LLMSettingsView)
     parsed_goal: dict[str, Any] = Field(default_factory=dict)
     state: dict[str, Any] = Field(default_factory=dict)
     adapter_state: dict[str, Any] = Field(default_factory=dict)

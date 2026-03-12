@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import Any
+
+from .llm.base import LLMRuntimeConfig
+from .llm.service import parse_goal_with_llm
+
+ZH_AVERAGE = ["\u5e73\u5747"]
+ZH_MAX = ["\u6700\u5927"]
+ZH_MIN = ["\u6700\u5c0f"]
+ZH_COUNT = ["\u6570\u91cf", "\u8ba1\u6570"]
+ZH_AGGREGATE = ["\u6c42\u548c", "\u6c47\u603b", "\u7edf\u8ba1", "\u603b\u548c"]
+ZH_EXCEL = ["\u8868\u683c", "\u5de5\u4f5c\u8868", "\u7535\u5b50\u8868\u683c"]
+ZH_CSV = ["\u9017\u53f7\u5206\u9694"]
+ZH_EXPORT = ["\u5bfc\u51fa", "\u4e0b\u8f7d"]
+ZH_FIELD = ["\u5b57\u6bb5", "\u5217"]
+ZH_AMOUNT = ["\u91d1\u989d", "\u4ef7\u683c"]
 
 
 def _normalize_source_type(value: Any) -> str:
@@ -28,15 +40,20 @@ def _normalize_method(value: Any) -> str:
     return "sum"
 
 
+def _contains_any(text: str, patterns: list[str]) -> bool:
+    lowered = text.lower()
+    return any(pattern.lower() in lowered for pattern in patterns)
+
+
 def _detect_method(goal_text: str) -> str:
     text = goal_text.lower()
-    if any(word in text for word in ["average", "avg", "mean", "平均", "均值"]):
+    if _contains_any(text, ["average", "avg", "mean", *ZH_AVERAGE]):
         return "mean"
-    if any(word in text for word in ["max", "maximum", "最大"]):
+    if _contains_any(text, ["max", "maximum", *ZH_MAX]):
         return "max"
-    if any(word in text for word in ["min", "minimum", "最小"]):
+    if _contains_any(text, ["min", "minimum", *ZH_MIN]):
         return "min"
-    if any(word in text for word in ["count", "数量", "计数"]):
+    if _contains_any(text, ["count", *ZH_COUNT]):
         return "count"
     return "sum"
 
@@ -44,39 +61,42 @@ def _detect_method(goal_text: str) -> str:
 def _detect_field(goal: str) -> str | None:
     patterns = [
         r"(?:sum|total|average|avg|mean|max|min|count)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-        r"(?:field|column|字段|列)\s*[:：]?\s*([a-zA-Z0-9_\u4e00-\u9fa5]+)",
-        r"([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:总和|汇总|求和|平均值|均值)",
+        r"(?:field|column)\s*[:=]?\s*([a-zA-Z0-9_\u4e00-\u9fa5]+)",
+        r"([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:sum|total|average|avg|mean|max|min|count)",
     ]
     for pattern in patterns:
         match = re.search(pattern, goal, flags=re.IGNORECASE)
         if match:
             return match.group(1).strip()
-    text = goal.lower()
-    if "price" in text:
+
+    lowered = goal.lower()
+    if "price" in lowered:
         return "price"
-    if "金额" in goal:
-        return "金额"
+    if any(token in goal for token in ZH_AMOUNT):
+        return "\u91d1\u989d" if "\u91d1\u989d" in goal else "\u4ef7\u683c"
     return None
 
 
 def _fallback_parse(goal: str) -> dict[str, Any]:
-    text = goal.lower()
+    lowered = goal.lower()
 
-    if any(word in text for word in ["csv", ".csv", "逗号分隔", "tsv", ".tsv"]):
+    if _contains_any(lowered, ["csv", ".csv", "tsv", ".tsv", *ZH_CSV]):
         source_type = "csv"
-    elif any(word in text for word in ["excel", ".xlsx", ".xls", "sheet", "表格"]):
+    elif _contains_any(lowered, ["excel", ".xlsx", ".xls", "sheet", *ZH_EXCEL]):
         source_type = "excel"
     else:
         source_type = "excel"
 
-    operation = "aggregate" if any(
-        word in text for word in ["sum", "total", "average", "avg", "mean", "max", "min", "count", "汇总", "求和", "统计"]
-    ) else "analyze"
+    operation = (
+        "aggregate"
+        if _contains_any(lowered, ["sum", "total", "average", "avg", "mean", "max", "min", "count", *ZH_AGGREGATE])
+        else "analyze"
+    )
     method = _detect_method(goal) if operation == "aggregate" else "sum"
 
-    if any(word in text for word in ["csv", ".csv", "导出csv"]):
+    if _contains_any(lowered, ["csv", ".csv", "export csv"]):
         output = "csv"
-    elif any(word in text for word in ["excel", "xlsx", "导出", "download"]):
+    elif _contains_any(lowered, ["excel", "xlsx", "download", *ZH_EXPORT]):
         output = "excel"
     else:
         output = "excel" if source_type == "excel" else "csv"
@@ -99,6 +119,7 @@ def _normalize_parsed_goal(parsed: dict[str, Any], goal: str) -> dict[str, Any]:
         source_type = fallback["source_type"]
 
     operation = str(parsed.get("operation") or fallback["operation"]).strip().lower() or fallback["operation"]
+
     field = parsed.get("field")
     if field is None:
         field = fallback["field"]
@@ -111,7 +132,7 @@ def _normalize_parsed_goal(parsed: dict[str, Any], goal: str) -> dict[str, Any]:
     if output not in {"excel", "csv", "json"}:
         output = fallback["output"]
 
-    normalized = {
+    return {
         "input_type": source_type,
         "source_type": source_type,
         "operation": operation,
@@ -119,43 +140,10 @@ def _normalize_parsed_goal(parsed: dict[str, Any], goal: str) -> dict[str, Any]:
         "method": _normalize_method(parsed.get("method") or fallback["method"]),
         "output": output,
     }
-    return normalized
 
 
-def parse_goal(goal: str) -> dict[str, Any]:
-    """
-    Parse user intent to normalized planning JSON.
-    Falls back to rule-based extraction when no OpenAI key is configured.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return _fallback_parse(goal)
-
-    try:
-        from openai import OpenAI
-    except Exception:
-        return _fallback_parse(goal)
-
-    prompt = (
-        "Parse the user goal into JSON with keys: "
-        "input_type, source_type, operation, field, method, output. "
-        "Return JSON only."
-    )
-
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=os.getenv("GOAL_PARSER_MODEL", "gpt-4.1-mini"),
-            temperature=0,
-            messages=[
-                {"role": "system", "content": "You are a strict JSON parser for workflow planning."},
-                {"role": "user", "content": f"{prompt}\nUser goal: {goal}"},
-            ],
-        )
-        text = response.choices[0].message.content or "{}"
-        parsed = json.loads(text)
-        if not isinstance(parsed, dict):
-            return _fallback_parse(goal)
+def parse_goal(goal: str, runtime: LLMRuntimeConfig | None = None) -> dict[str, Any]:
+    parsed = parse_goal_with_llm(goal, runtime)
+    if isinstance(parsed, dict):
         return _normalize_parsed_goal(parsed, goal)
-    except Exception:
-        return _fallback_parse(goal)
+    return _fallback_parse(goal)
