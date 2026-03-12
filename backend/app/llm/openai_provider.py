@@ -96,3 +96,34 @@ class OpenAIProvider:
             return None
         message = str(payload.get("message", "")).strip()
         return message or None
+
+    def interpret_node_dialogue(
+        self,
+        *,
+        goal: str,
+        parsed_goal: dict[str, Any],
+        state: dict[str, Any],
+        node: dict[str, Any],
+        message: str,
+        columns: list[str],
+    ) -> dict[str, Any] | None:
+        return self._json_completion(
+            system_prompt=(
+                "You convert a user's clarification reply into strict JSON updates for a workflow system. "
+                "Return JSON only. "
+                "Use only these state_patch keys when needed: selected_field, selected_method, parse_sheet, parse_delimiter, export_name. "
+                "Use only these parameter_patch keys when needed: message, options_override. "
+                "If nothing should change, return empty objects. "
+                "Keep reply concise and user-facing. "
+                "Do not mention internal nodes, parsing engines, or technical steps."
+            ),
+            user_prompt=(
+                "Return JSON with keys: state_patch, parameter_patch, reply.\n"
+                f"User goal: {goal}\n"
+                f"Parsed goal: {json.dumps(parsed_goal, ensure_ascii=False)}\n"
+                f"Current state: {json.dumps(state, ensure_ascii=False)}\n"
+                f"Current node: {json.dumps(node, ensure_ascii=False)}\n"
+                f"Available columns: {json.dumps(columns, ensure_ascii=False)}\n"
+                f"User message: {message}"
+            ),
+        )

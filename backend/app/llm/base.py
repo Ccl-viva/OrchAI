@@ -43,3 +43,15 @@ class LLMProvider(Protocol):
         options: list[str],
     ) -> str | None:
         ...
+
+    def interpret_node_dialogue(
+        self,
+        *,
+        goal: str,
+        parsed_goal: dict[str, Any],
+        state: dict[str, Any],
+        node: dict[str, Any],
+        message: str,
+        columns: list[str],
+    ) -> dict[str, Any] | None:
+        ...

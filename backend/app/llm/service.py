@@ -108,3 +108,31 @@ def generate_clarification_message(
         )
     except Exception:
         return None
+
+
+def interpret_node_dialogue(
+    *,
+    workflow_id: str,
+    llm_settings: dict[str, Any] | None,
+    goal: str,
+    parsed_goal: dict[str, Any],
+    state: dict[str, Any],
+    node: dict[str, Any],
+    message: str,
+    columns: list[str],
+) -> dict[str, Any] | None:
+    runtime = resolve_workflow_runtime(workflow_id, llm_settings)
+    if runtime is None:
+        return None
+    try:
+        provider = get_provider(runtime)
+        return provider.interpret_node_dialogue(
+            goal=goal,
+            parsed_goal=parsed_goal,
+            state=state,
+            node=node,
+            message=message,
+            columns=columns,
+        )
+    except Exception:
+        return None
