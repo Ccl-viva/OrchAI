@@ -106,6 +106,7 @@ def create_workflow(
         "selected_field": parsed_goal.get("field"),
         "selected_method": method_value,
         "parse_sheet": None,
+        "parse_delimiter": None,
         "export_name": None,
         "aggregate_result": None,
         "exported_file": None,

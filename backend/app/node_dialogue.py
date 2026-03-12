@@ -6,11 +6,15 @@ from typing import Any
 
 NODE_PROFILES = {
     "upload_file": {
-        "description": "Collect the Excel file from the user.",
+        "description": "Collect the source file from the user.",
         "purpose": "Provide source data for all downstream steps.",
     },
     "parse_excel": {
         "description": "Read and parse the uploaded Excel file into a table.",
+        "purpose": "Expose columns and sample rows for later operations.",
+    },
+    "parse_csv": {
+        "description": "Read and parse the uploaded CSV file into a table.",
         "purpose": "Expose columns and sample rows for later operations.",
     },
     "user_confirm": {
@@ -23,6 +27,10 @@ NODE_PROFILES = {
     },
     "export_excel": {
         "description": "Export computed results as an Excel file.",
+        "purpose": "Produce a downloadable artifact for the workflow.",
+    },
+    "export_csv": {
+        "description": "Export computed results as a CSV file.",
         "purpose": "Produce a downloadable artifact for the workflow.",
     },
 }
@@ -103,16 +111,34 @@ def _detect_sheet(message: str) -> str | int | None:
     return value
 
 
+def _detect_delimiter(message: str) -> str | None:
+    named_patterns = [
+        (r"(?:delimiter|delim|分隔符)\s*[:：]?\s*tab", "\t"),
+        (r"(?:delimiter|delim|分隔符)\s*[:：]?\s*comma", ","),
+        (r"(?:delimiter|delim|分隔符)\s*[:：]?\s*semicolon", ";"),
+        (r"(?:delimiter|delim|分隔符)\s*[:：]?\s*pipe", "|"),
+    ]
+    for pattern, value in named_patterns:
+        if re.search(pattern, message, flags=re.IGNORECASE):
+            return value
+
+    symbol_match = re.search(r"(?:delimiter|delim|分隔符)\s*[:：]\s*(.)", message, flags=re.IGNORECASE)
+    if symbol_match:
+        return symbol_match.group(1)
+    return None
+
+
 def _detect_export_name(message: str) -> str | None:
-    xlsx_match = re.search(r"([a-zA-Z0-9_\-\u4e00-\u9fa5]+\.xlsx)", message, flags=re.IGNORECASE)
-    if xlsx_match:
-        return xlsx_match.group(1)
+    for pattern in [r"([a-zA-Z0-9_\-\u4e00-\u9fa5]+\.(?:xlsx|csv))"]:
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
 
     pattern = r"(?:filename|file name|输出文件|文件名)\s*[:：]?\s*([a-zA-Z0-9_\-\u4e00-\u9fa5]+)"
     match = re.search(pattern, message, flags=re.IGNORECASE)
     if not match:
         return None
-    return f"{match.group(1)}.xlsx"
+    return match.group(1)
 
 
 def _detect_confirm_prompt(message: str) -> str | None:
@@ -168,12 +194,29 @@ def _collect_intent_updates(message: str, columns: list[str]) -> tuple[dict[str,
         state_patch["parse_sheet"] = sheet
         applied_updates["parse_sheet"] = sheet
 
+    delimiter = _detect_delimiter(message)
+    if delimiter is not None:
+        state_patch["parse_delimiter"] = delimiter
+        applied_updates["parse_delimiter"] = delimiter
+
     export_name = _detect_export_name(message)
     if export_name:
         state_patch["export_name"] = export_name
         applied_updates["export_name"] = export_name
 
     return state_patch, applied_updates
+
+
+def _normalize_export_name(raw_export_name: str, node_type: str) -> str:
+    name = raw_export_name.strip()
+    if not name:
+        return name
+    lowered = name.lower()
+    if node_type == "export_excel" and not lowered.endswith(".xlsx"):
+        return f"{name}.xlsx"
+    if node_type == "export_csv" and not lowered.endswith(".csv"):
+        return f"{name}.csv"
+    return name
 
 
 def apply_node_dialogue(
@@ -206,7 +249,6 @@ def apply_node_dialogue(
         if isinstance(sheet_name, (str, int)):
             parameters["sheet_name"] = sheet_name
             should_reset = True
-
         if "parse_sheet" in applied_updates:
             reply = f"Parse node will use sheet: {applied_updates['parse_sheet']}."
         elif applied_updates:
@@ -215,6 +257,20 @@ def apply_node_dialogue(
         else:
             reply = "You can set target sheet with `sheet: Sheet1`."
 
+    elif node_type == "parse_csv":
+        delimiter = state_patch.get("parse_delimiter")
+        if isinstance(delimiter, str) and delimiter:
+            parameters["delimiter"] = delimiter
+            should_reset = True
+        if "parse_delimiter" in applied_updates:
+            shown = "\\t" if applied_updates["parse_delimiter"] == "\t" else applied_updates["parse_delimiter"]
+            reply = f"Parse node will use delimiter: {shown}."
+        elif applied_updates:
+            reply = "Captured your intent updates. They will influence downstream nodes."
+            should_reset = True
+        else:
+            reply = "You can set CSV delimiter with `delimiter: ,` or `delimiter: tab`."
+
     elif node_type == "aggregate":
         if "selected_field" in applied_updates:
             parameters["field"] = applied_updates["selected_field"]
@@ -222,7 +278,6 @@ def apply_node_dialogue(
         if "selected_method" in applied_updates:
             parameters["method"] = applied_updates["selected_method"]
             should_reset = True
-
         if "selected_field" in applied_updates or "selected_method" in applied_updates:
             reply = "Aggregate node updated from your instruction."
         elif applied_updates:
@@ -234,7 +289,6 @@ def apply_node_dialogue(
     elif node_type == "user_confirm":
         prompt = _detect_confirm_prompt(message)
         options = _detect_options_override(message)
-
         if prompt:
             parameters["message"] = prompt
             applied_updates["message"] = prompt
@@ -243,7 +297,6 @@ def apply_node_dialogue(
             parameters["options_override"] = options
             applied_updates["options_override"] = options
             should_reset = True
-
         if prompt or options:
             reply = "Updated confirm node prompt/options."
         elif applied_updates:
@@ -252,26 +305,29 @@ def apply_node_dialogue(
         else:
             reply = "Use `prompt: ...` or `options: col1,col2` to customize this confirm node."
 
-    elif node_type == "export_excel":
+    elif node_type in {"export_excel", "export_csv"}:
         export_name = state_patch.get("export_name")
         if isinstance(export_name, str) and export_name:
-            parameters["export_name"] = export_name
+            normalized_name = _normalize_export_name(export_name, node_type)
+            parameters["export_name"] = normalized_name
+            state_patch["export_name"] = normalized_name
+            applied_updates["export_name"] = normalized_name
             should_reset = True
-
         if "export_name" in applied_updates:
             reply = f"Export file name set to {applied_updates['export_name']}."
         elif applied_updates:
             reply = "Captured your intent updates for this workflow."
             should_reset = True
         else:
-            reply = "You can rename output via `filename: result.xlsx`."
+            suffix_hint = "result.xlsx" if node_type == "export_excel" else "result.csv"
+            reply = f"You can rename output via `filename: {suffix_hint}`."
 
     elif node_type == "upload_file":
         if applied_updates:
             reply = "Captured your intent updates. They will be used when generating next nodes."
             should_reset = True
         else:
-            reply = "Upload node is ready. Please upload an Excel file to continue."
+            reply = "Upload node is ready. Please upload a source file to continue."
 
     else:
         if applied_updates:

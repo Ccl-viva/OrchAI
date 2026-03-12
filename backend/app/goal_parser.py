@@ -6,39 +6,120 @@ import re
 from typing import Any
 
 
-def _fallback_parse(goal: str) -> dict[str, Any]:
-    text = goal.lower()
-    input_type = "excel" if any(word in text for word in ["excel", "xlsx", "sheet", "表"]) else "table"
-    operation = "aggregate" if any(word in text for word in ["sum", "total", "汇总", "总和", "求和"]) else "analyze"
-    method = "sum" if operation == "aggregate" else "none"
-    output = "excel" if any(word in text for word in ["excel", "导出", "download"]) else "json"
+def _normalize_source_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "xlsx": "excel",
+        "xls": "excel",
+        "sheet": "excel",
+        "spreadsheet": "excel",
+        "csv_file": "csv",
+        "tsv": "csv",
+    }
+    return aliases.get(text, text)
 
-    field = None
-    candidates = [
-        r"sum\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-        r"汇总([^\s，。,\.]+)",
-        r"([a-zA-Z_][a-zA-Z0-9_]*)\s*总和",
+
+def _normalize_method(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"avg", "average"}:
+        return "mean"
+    if text in {"sum", "mean", "max", "min", "count"}:
+        return text
+    return "sum"
+
+
+def _detect_method(goal_text: str) -> str:
+    text = goal_text.lower()
+    if any(word in text for word in ["average", "avg", "mean", "平均", "均值"]):
+        return "mean"
+    if any(word in text for word in ["max", "maximum", "最大"]):
+        return "max"
+    if any(word in text for word in ["min", "minimum", "最小"]):
+        return "min"
+    if any(word in text for word in ["count", "数量", "计数"]):
+        return "count"
+    return "sum"
+
+
+def _detect_field(goal: str) -> str | None:
+    patterns = [
+        r"(?:sum|total|average|avg|mean|max|min|count)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        r"(?:field|column|字段|列)\s*[:：]?\s*([a-zA-Z0-9_\u4e00-\u9fa5]+)",
+        r"([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:总和|汇总|求和|平均值|均值)",
     ]
-    for pattern in candidates:
+    for pattern in patterns:
         match = re.search(pattern, goal, flags=re.IGNORECASE)
         if match:
-            field = match.group(1).strip()
-            break
+            return match.group(1).strip()
+    text = goal.lower()
+    if "price" in text:
+        return "price"
+    if "金额" in goal:
+        return "金额"
+    return None
 
-    if not field:
-        if "price" in text:
-            field = "price"
-        elif "价格" in goal:
-            field = "价格"
+
+def _fallback_parse(goal: str) -> dict[str, Any]:
+    text = goal.lower()
+
+    if any(word in text for word in ["csv", ".csv", "逗号分隔", "tsv", ".tsv"]):
+        source_type = "csv"
+    elif any(word in text for word in ["excel", ".xlsx", ".xls", "sheet", "表格"]):
+        source_type = "excel"
+    else:
+        source_type = "excel"
+
+    operation = "aggregate" if any(
+        word in text for word in ["sum", "total", "average", "avg", "mean", "max", "min", "count", "汇总", "求和", "统计"]
+    ) else "analyze"
+    method = _detect_method(goal) if operation == "aggregate" else "sum"
+
+    if any(word in text for word in ["csv", ".csv", "导出csv"]):
+        output = "csv"
+    elif any(word in text for word in ["excel", "xlsx", "导出", "download"]):
+        output = "excel"
+    else:
+        output = "excel" if source_type == "excel" else "csv"
 
     return {
-        "input_type": input_type,
-        "source_type": "excel" if input_type == "excel" else "table",
+        "input_type": source_type,
+        "source_type": source_type,
         "operation": operation,
-        "field": field,
+        "field": _detect_field(goal),
         "method": method,
         "output": output,
     }
+
+
+def _normalize_parsed_goal(parsed: dict[str, Any], goal: str) -> dict[str, Any]:
+    fallback = _fallback_parse(goal)
+
+    source_type = _normalize_source_type(parsed.get("source_type") or parsed.get("input_type") or fallback["source_type"])
+    if source_type not in {"excel", "csv"}:
+        source_type = fallback["source_type"]
+
+    operation = str(parsed.get("operation") or fallback["operation"]).strip().lower() or fallback["operation"]
+    field = parsed.get("field")
+    if field is None:
+        field = fallback["field"]
+    elif isinstance(field, str):
+        field = field.strip() or None
+    else:
+        field = str(field).strip() or None
+
+    output = str(parsed.get("output") or fallback["output"]).strip().lower() or fallback["output"]
+    if output not in {"excel", "csv", "json"}:
+        output = fallback["output"]
+
+    normalized = {
+        "input_type": source_type,
+        "source_type": source_type,
+        "operation": operation,
+        "field": field,
+        "method": _normalize_method(parsed.get("method") or fallback["method"]),
+        "output": output,
+    }
+    return normalized
 
 
 def parse_goal(goal: str) -> dict[str, Any]:
@@ -56,9 +137,9 @@ def parse_goal(goal: str) -> dict[str, Any]:
         return _fallback_parse(goal)
 
     prompt = (
-        "将用户任务解析为JSON，字段必须包含："
-        "input_type, source_type, operation, field, method, output。"
-        "只输出JSON对象，不要解释。"
+        "Parse the user goal into JSON with keys: "
+        "input_type, source_type, operation, field, method, output. "
+        "Return JSON only."
     )
 
     try:
@@ -68,16 +149,13 @@ def parse_goal(goal: str) -> dict[str, Any]:
             temperature=0,
             messages=[
                 {"role": "system", "content": "You are a strict JSON parser for workflow planning."},
-                {"role": "user", "content": f"{prompt}\n用户任务：{goal}"},
+                {"role": "user", "content": f"{prompt}\nUser goal: {goal}"},
             ],
         )
         text = response.choices[0].message.content or "{}"
         parsed = json.loads(text)
-        required = {"input_type", "operation", "field", "method", "output"}
-        if not required.issubset(set(parsed.keys())):
+        if not isinstance(parsed, dict):
             return _fallback_parse(goal)
-        if "source_type" not in parsed:
-            parsed["source_type"] = "excel" if parsed.get("input_type") == "excel" else "table"
-        return parsed
+        return _normalize_parsed_goal(parsed, goal)
     except Exception:
         return _fallback_parse(goal)

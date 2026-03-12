@@ -28,9 +28,11 @@ const { Title, Text } = Typography;
 const NODE_LABELS: Record<string, string> = {
   upload_file: "Upload File",
   parse_excel: "Parse Excel",
+  parse_csv: "Parse CSV",
   user_confirm: "User Confirm",
   aggregate: "Aggregate Sum",
-  export_excel: "Export Result"
+  export_excel: "Export Result",
+  export_csv: "Export CSV"
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -50,6 +52,10 @@ const NODE_DETAILS: Record<string, { description: string; purpose: string }> = {
     description: "Read and parse Excel into structured rows.",
     purpose: "Expose available fields and sample data."
   },
+  parse_csv: {
+    description: "Read and parse CSV into structured rows.",
+    purpose: "Expose available fields and sample data."
+  },
   user_confirm: {
     description: "Ask user to confirm ambiguous choices.",
     purpose: "Avoid wrong field mapping before aggregation."
@@ -61,6 +67,10 @@ const NODE_DETAILS: Record<string, { description: string; purpose: string }> = {
   export_excel: {
     description: "Export current result to an Excel file.",
     purpose: "Generate downloadable deliverable."
+  },
+  export_csv: {
+    description: "Export current result to a CSV file.",
+    purpose: "Generate downloadable deliverable."
   }
 };
 
@@ -68,6 +78,19 @@ type NodePosition = { x: number; y: number };
 type PreviewCellCoord = { row: number; col: number };
 type PreviewSelection = { rowStart: number; rowEnd: number; colStart: number; colEnd: number };
 type PreviewTableRow = { key: string } & Record<string, string | number>;
+type PreviewMode = "table" | "chart" | "split";
+type ColumnMetric = {
+  count: number;
+  sum: number;
+  min: number;
+  max: number;
+  avg: number;
+};
+type ChartPoint = {
+  rowIndex: number;
+  label: string;
+  value: number;
+};
 
 type FlowNodeData = {
   id: string;
@@ -172,6 +195,40 @@ function readStringArray(value: unknown): string[] {
     }
   }
   return values;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.replace(/,/g, "").trim();
+    if (!normalized) {
+      return null;
+    }
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function formatMetric(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+  if (Math.abs(value) >= 1000) {
+    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  return value.toFixed(2).replace(/\.00$/, "");
+}
+
+function clampLabel(text: string, limit = 14): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}...`;
 }
 
 function buildConfirmFromNode(node: WorkflowNode | null, workflow: WorkflowData | null): PendingConfirmation | null {
@@ -362,6 +419,7 @@ export default function App() {
   const [previewDragActive, setPreviewDragActive] = useState(false);
   const [previewDragStart, setPreviewDragStart] = useState<PreviewCellCoord | null>(null);
   const [previewDragEnd, setPreviewDragEnd] = useState<PreviewCellCoord | null>(null);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("split");
 
   const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
   const preview = useMemo(() => findLatestPreview(events, workflow), [events, workflow]);
@@ -389,8 +447,8 @@ export default function App() {
   }, [orderedNodes, selectedNodeId]);
 
   const canDragSelectInPreview = useMemo(() => {
-    return Boolean(activeConfirm && preview && preview.columns.length > 0 && preview.rows.length > 0);
-  }, [activeConfirm, preview]);
+    return Boolean(preview && preview.columns.length > 0 && preview.rows.length > 0);
+  }, [preview]);
 
   const previewSelection = useMemo<PreviewSelection | null>(() => {
     if (!previewDragStart || !previewDragEnd) {
@@ -423,6 +481,96 @@ export default function App() {
     const lower = activeConfirm.options.find((option) => option.toLowerCase() === selectedColumn.toLowerCase());
     return lower ?? "";
   }, [activeConfirm, previewSelectedColumns]);
+
+  const previewSelectedRangeText = useMemo(() => {
+    if (!previewSelection) {
+      return "";
+    }
+    return `R${previewSelection.rowStart + 1}:R${previewSelection.rowEnd + 1} · C${previewSelection.colStart + 1}:C${previewSelection.colEnd + 1}`;
+  }, [previewSelection]);
+
+  const previewColumnMetrics = useMemo<Record<string, ColumnMetric>>(() => {
+    const metrics: Record<string, ColumnMetric> = {};
+    if (!preview || !preview.columns.length || !preview.rows.length) {
+      return metrics;
+    }
+
+    for (let colIndex = 0; colIndex < preview.columns.length; colIndex += 1) {
+      const column = preview.columns[colIndex];
+      const numbers: number[] = [];
+      for (const row of preview.rows) {
+        const maybe = toNumber(row[colIndex]);
+        if (maybe !== null) {
+          numbers.push(maybe);
+        }
+      }
+      if (!numbers.length) {
+        continue;
+      }
+      const sum = numbers.reduce((acc, item) => acc + item, 0);
+      metrics[column] = {
+        count: numbers.length,
+        sum,
+        min: Math.min(...numbers),
+        max: Math.max(...numbers),
+        avg: sum / numbers.length
+      };
+    }
+
+    return metrics;
+  }, [preview]);
+
+  const numericColumns = useMemo(() => Object.keys(previewColumnMetrics), [previewColumnMetrics]);
+
+  const activeChartColumn = useMemo(() => {
+    const selectedNumeric = previewSelectedColumns.find((column) => numericColumns.includes(column));
+    if (selectedNumeric) {
+      return selectedNumeric;
+    }
+    return numericColumns[0] ?? "";
+  }, [numericColumns, previewSelectedColumns]);
+
+  const chartPoints = useMemo<ChartPoint[]>(() => {
+    if (!preview || !activeChartColumn) {
+      return [];
+    }
+
+    const valueColumnIndex = preview.columns.findIndex((column) => column === activeChartColumn);
+    if (valueColumnIndex < 0) {
+      return [];
+    }
+    let labelColumnIndex = preview.columns.findIndex((column) => column !== activeChartColumn);
+    if (labelColumnIndex < 0) {
+      labelColumnIndex = valueColumnIndex;
+    }
+
+    const points: ChartPoint[] = [];
+    for (let rowIndex = 0; rowIndex < preview.rows.length; rowIndex += 1) {
+      const row = preview.rows[rowIndex];
+      const value = toNumber(row[valueColumnIndex]);
+      if (value === null) {
+        continue;
+      }
+      const label = String(row[labelColumnIndex] ?? `Row ${rowIndex + 1}`).trim() || `Row ${rowIndex + 1}`;
+      points.push({
+        rowIndex,
+        label: clampLabel(label),
+        value
+      });
+      if (points.length >= 18) {
+        break;
+      }
+    }
+    return points;
+  }, [activeChartColumn, preview]);
+
+  const chartValueRange = useMemo(() => {
+    if (!chartPoints.length) {
+      return { min: 0, max: 0 };
+    }
+    const values = chartPoints.map((item) => item.value);
+    return { min: Math.min(...values), max: Math.max(...values) };
+  }, [chartPoints]);
 
   useEffect(() => {
     if (!activeConfirm) {
@@ -611,6 +759,15 @@ export default function App() {
     setPreviewDragEnd({ row, col });
   }
 
+  function selectWholeColumn(col: number) {
+    if (!preview || preview.rows.length === 0) {
+      return;
+    }
+    setPreviewDragStart({ row: 0, col });
+    setPreviewDragEnd({ row: preview.rows.length - 1, col });
+    setPreviewDragActive(false);
+  }
+
   function isPreviewCellSelected(row: number, col: number): boolean {
     if (!previewSelection) {
       return false;
@@ -770,7 +927,11 @@ export default function App() {
           setPreviewDragActive(false);
         }
       };
-    }
+    },
+    onHeaderCell: () => ({
+      onClick: () => selectWholeColumn(columnIndex),
+      className: canDragSelectInPreview ? "preview-header-selectable" : undefined
+    })
   }));
 
   const tableData = (preview?.rows ?? []).map((row, index) => {
@@ -787,19 +948,103 @@ export default function App() {
       label: "Preview",
       children: preview ? (
         <div className="sidebar-panel preview-panel">
+          <div className="preview-toolbar">
+            <Space size={6}>
+              <Button size="small" type={previewMode === "table" ? "primary" : "default"} onClick={() => setPreviewMode("table")}>
+                Table
+              </Button>
+              <Button size="small" type={previewMode === "chart" ? "primary" : "default"} onClick={() => setPreviewMode("chart")}>
+                Chart
+              </Button>
+              <Button size="small" type={previewMode === "split" ? "primary" : "default"} onClick={() => setPreviewMode("split")}>
+                Split
+              </Button>
+            </Space>
+            {previewSelection && (
+              <Button
+                size="small"
+                onClick={() => {
+                  setPreviewDragStart(null);
+                  setPreviewDragEnd(null);
+                }}
+              >
+                Clear Selection
+              </Button>
+            )}
+          </div>
+
+          {previewSelection && <Text className="preview-selection-label">Selection: {previewSelectedRangeText}</Text>}
+
           {activeConfirm && (
             <Text type="secondary" className="preview-drag-hint">
-              拖动选择一列可直接填入确认字段。
+              Drag cells or click a column header to set the confirm field directly.
             </Text>
           )}
-          <Table
-            pagination={false}
-            columns={tableColumns}
-            dataSource={tableData}
-            size="small"
-            scroll={{ x: true, y: 430 }}
-            className={`preview-table${canDragSelectInPreview ? " preview-table-draggable" : ""}`}
-          />
+
+          {activeChartColumn && previewColumnMetrics[activeChartColumn] && (
+            <div className="preview-metrics">
+              <div className="preview-metric-card">
+                <span>Column</span>
+                <strong>{activeChartColumn}</strong>
+              </div>
+              <div className="preview-metric-card">
+                <span>Count</span>
+                <strong>{previewColumnMetrics[activeChartColumn].count}</strong>
+              </div>
+              <div className="preview-metric-card">
+                <span>Avg</span>
+                <strong>{formatMetric(previewColumnMetrics[activeChartColumn].avg)}</strong>
+              </div>
+              <div className="preview-metric-card">
+                <span>Sum</span>
+                <strong>{formatMetric(previewColumnMetrics[activeChartColumn].sum)}</strong>
+              </div>
+            </div>
+          )}
+
+          {(previewMode === "chart" || previewMode === "split") && (
+            <div className="preview-chart-shell">
+              {!chartPoints.length ? (
+                <Text type="secondary">No numeric column available for chart preview.</Text>
+              ) : (
+                <>
+                  <div className="preview-chart-title">
+                    <Text strong>{activeChartColumn}</Text>
+                    <Text type="secondary">
+                      Range: {formatMetric(chartValueRange.min)} ~ {formatMetric(chartValueRange.max)}
+                    </Text>
+                  </div>
+                  <div className="preview-chart">
+                    {chartPoints.map((point) => {
+                      const minBase = Math.min(0, chartValueRange.min);
+                      const denominator = Math.max(1, chartValueRange.max - minBase);
+                      const ratio = Math.max(0.04, (point.value - minBase) / denominator);
+                      return (
+                        <div className="preview-bar-item" key={`${point.rowIndex}-${point.label}`}>
+                          <div className="preview-bar-track">
+                            <div className="preview-bar-fill" style={{ height: `${Math.min(100, ratio * 100)}%` }} title={`${point.label}: ${point.value}`} />
+                          </div>
+                          <span className="preview-bar-label">{point.label}</span>
+                          <span className="preview-bar-value">{formatMetric(point.value)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {(previewMode === "table" || previewMode === "split") && (
+            <Table
+              pagination={false}
+              columns={tableColumns}
+              dataSource={tableData}
+              size="small"
+              scroll={{ x: true, y: previewMode === "split" ? 250 : 430 }}
+              className={`preview-table${canDragSelectInPreview ? " preview-table-draggable" : ""}`}
+            />
+          )}
         </div>
       ) : (
         <div className="sidebar-panel">

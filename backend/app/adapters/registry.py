@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import WorkflowAdapter
+from .csv import CsvWorkflowAdapter
 from .excel import ExcelWorkflowAdapter
 
 
@@ -10,6 +11,7 @@ DEFAULT_SOURCE_TYPE = "excel"
 
 _ADAPTERS: dict[str, WorkflowAdapter] = {
     DEFAULT_SOURCE_TYPE: ExcelWorkflowAdapter(),
+    "csv": CsvWorkflowAdapter(),
 }
 
 
@@ -25,6 +27,9 @@ def resolve_source_type(parsed_goal: dict[str, Any]) -> str:
         "xls": "excel",
         "sheet": "excel",
         "spreadsheet": "excel",
+        "csv_file": "csv",
+        "tsv": "csv",
+        "text/csv": "csv",
     }
     normalized = alias_map.get(raw, raw)
     if normalized in _ADAPTERS:

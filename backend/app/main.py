@@ -65,7 +65,7 @@ def _safe_filename(name: str) -> str:
 
 def _reset_state_from_node(node_type: str, state: dict[str, Any]) -> dict[str, Any]:
     updated = dict(state)
-    if node_type in {"parse_excel", "upload_file"}:
+    if node_type in {"parse_excel", "parse_csv", "upload_file"}:
         updated["columns"] = []
         updated["preview"] = None
         updated["aggregate_result"] = None
@@ -79,7 +79,7 @@ def _reset_state_from_node(node_type: str, state: dict[str, Any]) -> dict[str, A
         updated["aggregate_result"] = None
         updated["exported_file"] = None
         return updated
-    if node_type == "export_excel":
+    if node_type in {"export_excel", "export_csv"}:
         updated["exported_file"] = None
         return updated
     return updated
