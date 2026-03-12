@@ -341,29 +341,6 @@ POST /node/chat
 - `GET /workflow/{workflow_id}`
 - `GET /task/download/{workflow_id}`
 
-## Demo Story | Demo 展示话术
-
-### English
-If you are presenting OrchAI, the story is:
-
-1. the user does not write a perfect prompt
-2. the system still understands the goal
-3. technical steps stay hidden
-4. only one focused clarification bubble appears
-5. the user answers in natural language
-6. the system continues automatically
-7. the result is previewed and exported
-
-### 中文
-如果你要做项目演示，最适合的叙事方式是：
-
-1. 用户一开始并没有写出一个完美 Prompt
-2. 系统仍然能先理解目标
-3. 技术路径默认隐藏
-4. 只有一个聚焦的澄清气泡被抛出来
-5. 用户直接用自然语言回答
-6. 系统自动继续推进
-7. 最终结果被实时预览并导出
 
 ## Roadmap | 路线图
 
