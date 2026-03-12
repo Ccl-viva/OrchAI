@@ -117,8 +117,8 @@ body {
 }
 
 .rf-goal-node {
-  width: 188px;
-  height: 188px;
+  width: 220px;
+  min-height: 220px;
   border-radius: 999px;
   border: 1px solid #f2bed7;
   background: radial-gradient(circle at 28% 22%, #ffe5f2 0%, #ffd2e8 48%, #ffc4de 100%);
@@ -127,8 +127,8 @@ body {
   align-content: center;
   justify-items: center;
   text-align: center;
-  padding: 16px;
-  gap: 4px;
+  padding: 18px 18px 20px;
+  gap: 6px;
   transition: box-shadow 160ms ease, transform 160ms ease;
 }
 
@@ -156,6 +156,25 @@ body {
 .rf-goal-sub {
   font-size: 12px;
   color: #7c4e67;
+}
+
+.rf-goal-state {
+  font-size: 11px;
+  font-weight: 700;
+  color: #5f3351;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #fff7fb;
+  border: 1px solid #f0c6da;
+}
+
+.rf-goal-action {
+  margin-top: 2px;
+}
+
+.rf-goal-inline {
+  font-size: 11px;
+  color: #6f4d61;
 }
 
 .rf-step-node {
@@ -236,6 +255,15 @@ body {
 .rf-step-action-stack {
   display: grid;
   gap: 8px;
+}
+
+.rf-step-response {
+  border: 1px solid #d7e5d5;
+  border-radius: 10px;
+  background: #f6fff7;
+  padding: 8px;
+  font-size: 12px;
+  color: #2e6443;
 }
 
 .rf-step-chat {

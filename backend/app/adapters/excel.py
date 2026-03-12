@@ -118,6 +118,11 @@ class ExcelWorkflowAdapter:
                     state=next_state,
                     workflow_status="ready",
                     node_status="success",
+                    node_parameters={
+                        **parameters,
+                        "confirmed_value": selected,
+                        "resolved": True,
+                    },
                     advance=True,
                     event={
                         "node_id": node["id"],
@@ -148,6 +153,11 @@ class ExcelWorkflowAdapter:
                     state=next_state,
                     workflow_status="ready",
                     node_status="success",
+                    node_parameters={
+                        **parameters,
+                        "confirmed_value": resolved_current,
+                        "resolved": True,
+                    },
                     advance=True,
                     event={
                         "node_id": node["id"],

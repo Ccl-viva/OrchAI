@@ -185,6 +185,21 @@ def _refresh_with_next_node(
     return updated
 
 
+def _persist_execution_result(workflow_id: str, node: dict[str, Any], result: Any) -> None:
+    if result.node_status or result.node_parameters is not None:
+        update_node_data(
+            node["id"],
+            status=result.node_status or node["status"],
+            parameters=result.node_parameters if result.node_parameters is not None else node.get("parameters", {}),
+        )
+
+    update_workflow(workflow_id, state=result.state, status=result.workflow_status)
+
+    if result.log_status:
+        payload_data = result.log_result or {"message": result.event.get("message", "") if result.event else ""}
+        log_execution(workflow_id, node["id"], result.log_status, payload_data)
+
+
 @app.post("/node/chat", response_model=NodeChatResponse)
 def node_chat(payload: NodeChatRequest) -> NodeChatResponse:
     message_text = payload.message.strip()
@@ -249,68 +264,66 @@ def execute_workflow(payload: ExecuteRequest) -> ExecuteResponse:
 
     events: list[ExecuteEvent] = []
     update_workflow(workflow_id, status="running")
+    confirm_value = payload.confirm_value
 
-    workflow = get_workflow(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=500, detail="Workflow lost during execution.")
+    for _ in range(24):
+        workflow = get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=500, detail="Workflow lost during execution.")
 
-    node = _ensure_next_node(workflow, adapter=adapter)
-    if not node:
-        update_workflow(workflow_id, status="completed")
-        completed = get_workflow(workflow_id)
-        if not completed:
-            raise HTTPException(status_code=500, detail="Workflow completed but unavailable.")
-        return ExecuteResponse(workflow=_workflow_view(completed), events=events)
+        node = _ensure_next_node(workflow, adapter=adapter)
+        if not node:
+            update_workflow(workflow_id, status="completed")
+            completed = get_workflow(workflow_id)
+            if not completed:
+                raise HTTPException(status_code=500, detail="Workflow completed but unavailable.")
+            return ExecuteResponse(workflow=_workflow_view(completed), events=events)
 
-    try:
-        result = adapter.execute_node(
-            workflow_id=workflow_id,
-            node=node,
-            state=workflow["state"],
-            confirm_value=payload.confirm_value,
-        )
-    except AdapterInputError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        update_node(node["id"], status="failed")
-        update_workflow(workflow_id, status="failed")
-        log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
-        raise HTTPException(status_code=400, detail=f"{node['type']} failed: {exc}") from exc
+        try:
+            result = adapter.execute_node(
+                workflow_id=workflow_id,
+                node=node,
+                state=workflow["state"],
+                confirm_value=confirm_value,
+            )
+        except AdapterInputError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            update_node(node["id"], status="failed")
+            update_workflow(workflow_id, status="failed")
+            log_execution(workflow_id, node["id"], "failed", {"error": str(exc)})
+            raise HTTPException(status_code=400, detail=f"{node['type']} failed: {exc}") from exc
 
-    if result.node_status:
-        update_node(node["id"], status=result.node_status)
+        confirm_value = None
+        _persist_execution_result(workflow_id, node, result)
 
-    update_workflow(workflow_id, state=result.state, status=result.workflow_status)
+        if result.event:
+            events.append(ExecuteEvent(**result.event))
 
-    if result.log_status:
-        payload_data = result.log_result or {"message": result.event.get("message", "") if result.event else ""}
-        log_execution(workflow_id, node["id"], result.log_status, payload_data)
+        if result.pending_confirmation is not None:
+            pending = result.pending_confirmation
+            pending_message = str(pending.get("message", "Please confirm to continue."))
+            pending_options = [str(item) for item in pending.get("options", [])]
+            refreshed = get_workflow(workflow_id)
+            if not refreshed:
+                raise HTTPException(status_code=500, detail="Workflow unavailable.")
+            return ExecuteResponse(
+                workflow=_workflow_view(refreshed),
+                events=events,
+                pending_confirmation=PendingConfirmation(message=pending_message, options=pending_options),
+            )
 
-    if result.event:
-        events.append(ExecuteEvent(**result.event))
+        if not result.advance:
+            updated = get_workflow(workflow_id)
+            if not updated:
+                raise HTTPException(status_code=500, detail="Workflow unavailable.")
+            return ExecuteResponse(workflow=_workflow_view(updated), events=events)
 
-    if result.pending_confirmation is not None:
-        pending = result.pending_confirmation
-        pending_message = str(pending.get("message", "Please confirm to continue."))
-        pending_options = [str(item) for item in pending.get("options", [])]
-        refreshed = get_workflow(workflow_id)
-        if not refreshed:
-            raise HTTPException(status_code=500, detail="Workflow unavailable.")
-        return ExecuteResponse(
-            workflow=_workflow_view(refreshed),
-            events=events,
-            pending_confirmation=PendingConfirmation(message=pending_message, options=pending_options),
-        )
-
-    if result.advance:
         next_status = result.workflow_status if result.workflow_status not in {"running"} else "ready"
-        updated = _refresh_with_next_node(workflow_id, adapter=adapter, default_status=next_status)
-    else:
-        updated = get_workflow(workflow_id)
-        if not updated:
-            raise HTTPException(status_code=500, detail="Workflow unavailable.")
+        _refresh_with_next_node(workflow_id, adapter=adapter, default_status=next_status)
 
-    return ExecuteResponse(workflow=_workflow_view(updated), events=events)
+    update_workflow(workflow_id, status="failed")
+    raise HTTPException(status_code=500, detail="Workflow exceeded automatic execution limit.")
 
 
 @app.get("/workflow/{workflow_id}", response_model=WorkflowView)

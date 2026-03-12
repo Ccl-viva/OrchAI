@@ -13,6 +13,7 @@ class AdapterExecutionResult:
     state: dict[str, Any]
     workflow_status: str
     node_status: str | None = None
+    node_parameters: dict[str, Any] | None = None
     advance: bool = False
     event: dict[str, Any] | None = None
     pending_confirmation: dict[str, Any] | None = None

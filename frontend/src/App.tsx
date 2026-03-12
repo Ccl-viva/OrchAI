@@ -29,7 +29,7 @@ const NODE_LABELS: Record<string, string> = {
   upload_file: "Upload File",
   parse_excel: "Parse Excel",
   parse_csv: "Parse CSV",
-  user_confirm: "User Confirm",
+  user_confirm: "Clarify",
   aggregate: "Aggregate Sum",
   export_excel: "Export Result",
   export_csv: "Export CSV"
@@ -102,6 +102,10 @@ type FlowNodeData = {
   status: string;
   selected?: boolean;
   nodeType?: string;
+  responseText?: string;
+  goalStatus?: string;
+  goalHint?: string;
+  downloadHref?: string;
   canExecute?: boolean;
   running?: boolean;
   canUpload?: boolean;
@@ -248,12 +252,46 @@ function buildConfirmFromNode(node: WorkflowNode | null, workflow: WorkflowData 
   };
 }
 
+function buildUploadProps(onUpload?: (file: File) => Promise<void>): UploadProps {
+  return {
+    maxCount: 1,
+    showUploadList: false,
+    customRequest: async (options) => {
+      try {
+        const file = options.file as File;
+        await onUpload?.(file);
+        options.onSuccess?.({}, options.file);
+      } catch (error) {
+        options.onError?.(new Error(String(error)));
+      }
+    }
+  };
+}
+
 function GoalNode({ data }: NodeProps<FlowNodeData>) {
+  const uploadProps = buildUploadProps(data.onUpload);
+
   return (
     <div className={`rf-goal-node ${data.selected ? "rf-goal-selected" : ""}`}>
       <div className="rf-goal-kicker">GOAL</div>
       <div className="rf-goal-title">{data.title}</div>
-      <div className="rf-goal-sub">{data.subtitle}</div>
+      <div className="rf-goal-sub">{data.goalHint ?? data.subtitle}</div>
+      <div className="rf-goal-state">{data.goalStatus ?? data.subtitle}</div>
+      {data.canUpload && (
+        <div className="nodrag nopan rf-goal-action">
+          <Upload {...uploadProps}>
+            <Button size="small" shape="round">
+              Upload File
+            </Button>
+          </Upload>
+        </div>
+      )}
+      {!data.canUpload && data.running && <div className="rf-goal-inline">AI is refining your request</div>}
+      {!data.canUpload && data.downloadHref && (
+        <Button size="small" shape="round" href={data.downloadHref} target="_blank">
+          Download
+        </Button>
+      )}
       <Handle type="source" position={Position.Right} className="rf-handle" />
     </div>
   );
@@ -261,20 +299,7 @@ function GoalNode({ data }: NodeProps<FlowNodeData>) {
 
 function StepNode({ data }: NodeProps<FlowNodeData>) {
   const [chatText, setChatText] = useState("");
-
-  const uploadProps: UploadProps = {
-    maxCount: 1,
-    showUploadList: false,
-    customRequest: async (options) => {
-      try {
-        const file = options.file as File;
-        await data.onUpload?.(file);
-        options.onSuccess?.({}, options.file);
-      } catch (error) {
-        options.onError?.(new Error(String(error)));
-      }
-    }
-  };
+  const uploadProps = buildUploadProps(data.onUpload);
 
   async function submitChat() {
     if (!data.onChatSend) {
@@ -311,6 +336,8 @@ function StepNode({ data }: NodeProps<FlowNodeData>) {
           <div className="rf-step-meta-title">Purpose</div>
           <div>{data.purpose}</div>
         </div>
+
+        {data.responseText && <div className="rf-step-response">{data.responseText}</div>}
 
         {data.canUpload && (
           <div className="nodrag nopan rf-step-action">
@@ -354,7 +381,7 @@ function StepNode({ data }: NodeProps<FlowNodeData>) {
         )}
 
         <div className="nodrag nopan rf-step-chat">
-          <div className="rf-step-chat-title">Node Chat</div>
+          <div className="rf-step-chat-title">Clarification Chat</div>
           {data.conversation.length > 0 && (
             <div className="rf-step-chat-history">
               {data.conversation.map((item, index) => (
@@ -372,7 +399,7 @@ function StepNode({ data }: NodeProps<FlowNodeData>) {
             value={chatText}
             onChange={(event) => setChatText(event.target.value)}
             autoSize={{ minRows: 1, maxRows: 3 }}
-            placeholder="Ask to modify this node action..."
+            placeholder="Clarify what you actually want here..."
           />
           <Button size="small" onClick={submitChat} loading={data.chatSending}>
             Send
@@ -432,19 +459,27 @@ export default function App() {
   }, [workflow]);
 
   const nextPendingNode = useMemo(() => orderedNodes.find((node) => node.status === "pending") ?? null, [orderedNodes]);
+  const visibleCanvasNodes = useMemo(
+    () => orderedNodes.filter((node) => node.type === "user_confirm"),
+    [orderedNodes]
+  );
   const activeConfirm = useMemo(() => {
     if (!nextPendingNode || nextPendingNode.type !== "user_confirm") {
       return null;
     }
     return pendingConfirm ?? buildConfirmFromNode(nextPendingNode, workflow);
   }, [nextPendingNode, pendingConfirm, workflow]);
+  const uploadNodePending = useMemo(
+    () => Boolean(nextPendingNode && nextPendingNode.type === "upload_file" && nextPendingNode.status === "pending"),
+    [nextPendingNode]
+  );
 
   const selectedNode = useMemo(() => {
-    if (!selectedNodeId) {
+    if (!selectedNodeId || selectedNodeId === "goal") {
       return null;
     }
-    return orderedNodes.find((item) => item.id === selectedNodeId) ?? null;
-  }, [orderedNodes, selectedNodeId]);
+    return visibleCanvasNodes.find((item) => item.id === selectedNodeId) ?? null;
+  }, [selectedNodeId, visibleCanvasNodes]);
 
   const canDragSelectInPreview = useMemo(() => {
     return Boolean(preview && preview.columns.length > 0 && preview.rows.length > 0);
@@ -618,27 +653,41 @@ export default function App() {
     setWorkflow(result.workflow);
     setPendingConfirm(null);
     message.success("Upload complete.");
+    await runWorkflow(undefined, result.workflow.id, "quiet");
   }
 
-  async function runWorkflow(confirm?: string) {
-    if (!workflow) {
+  async function runWorkflow(confirm?: string, workflowIdOverride?: string, toastMode: "default" | "quiet" = "default") {
+    const workflowId = workflowIdOverride ?? workflow?.id;
+    if (!workflowId) {
       message.error("Create a task first.");
       return;
     }
 
     setRunningWorkflow(true);
     try {
-      const result = await executeWorkflow(workflow.id, confirm);
+      const result = await executeWorkflow(workflowId, confirm);
       setWorkflow(result.workflow);
       setEvents((prev) => [...prev, ...result.events]);
       setPendingConfirm(result.pending_confirmation ?? null);
 
       if (result.pending_confirmation) {
+        const pendingNode = result.workflow.nodes
+          .slice()
+          .sort((a, b) => a.order_index - b.order_index)
+          .find((node) => node.status === "pending" && node.type === "user_confirm");
+        setSelectedNodeId(pendingNode?.id ?? "goal");
         setConfirmValue(result.pending_confirmation.options[0] ?? "");
-        message.info("Paused at confirm step.");
+        if (toastMode === "default") {
+          message.info("Need your input to continue.");
+        }
       } else if (result.workflow.status === "completed") {
-        message.success("Workflow completed.");
+        setSelectedNodeId("goal");
+        setConfirmValue("");
+        if (toastMode === "default") {
+          message.success("Workflow completed.");
+        }
       }
+      return result;
     } catch (error) {
       message.error(`Run failed: ${String(error)}`);
     } finally {
@@ -661,6 +710,14 @@ export default function App() {
         message.success(result.reply);
       } else {
         message.info(result.reply);
+      }
+
+      const refreshedPending = result.workflow.nodes
+        .slice()
+        .sort((a, b) => a.order_index - b.order_index)
+        .find((item) => item.status === "pending");
+      if (refreshedPending?.id === nodeId) {
+        await runWorkflow(undefined, result.workflow.id, "quiet");
       }
     } catch (error) {
       message.error(`Node chat failed: ${String(error)}`);
@@ -697,7 +754,7 @@ export default function App() {
       setPendingConfirm(null);
       setConfirmValue("");
       setChattingNodeId(null);
-      setSelectedNodeId(created.workflow.nodes[0]?.id ?? "goal");
+      setSelectedNodeId("goal");
       message.success("Moved into canvas.");
     } catch (error) {
       message.error(`Create failed: ${String(error)}`);
@@ -783,6 +840,26 @@ export default function App() {
 
     setFlowNodes((prev) => {
       const prevMap = new Map(prev.map((node) => [node.id, node]));
+      const goalStatus =
+        workflow.status === "completed"
+          ? "Result ready"
+          : uploadNodePending
+            ? "Waiting for source file"
+            : activeConfirm
+              ? "Needs one clarification"
+              : runningWorkflow || workflow.status === "running"
+                ? "Refining your request"
+                : workflow.status === "failed"
+                  ? "Needs attention"
+                  : "Following the inferred path";
+      const goalHint =
+        workflow.status === "completed"
+          ? "The result is ready. Preview and download stay on the right."
+          : uploadNodePending
+            ? "Upload your spreadsheet. The system will hide technical steps and only ask when intent is unclear."
+            : activeConfirm
+              ? "Only the ambiguous decision is surfaced here."
+              : "The system is handling internal steps in the background.";
       const nodes: Node<FlowNodeData>[] = [
         {
           id: "goal",
@@ -791,20 +868,25 @@ export default function App() {
           data: {
             id: "goal",
             title: shortGoal(workflow.goal),
-            subtitle: "Drag to reposition",
+            subtitle: "Intent anchor",
             description: "Top-level objective provided by the user.",
-            purpose: "Guide planner to build downstream workflow nodes.",
+            purpose: "Guide planner to fill in the hidden execution path.",
             conversation: [],
             status: "success",
-            selected: selectedNodeId === "goal"
+            selected: selectedNodeId === "goal",
+            goalStatus,
+            goalHint,
+            canUpload: uploadNodePending,
+            onUpload: handleNodeUpload,
+            running: runningWorkflow,
+            downloadHref: workflow.status === "completed" ? `${apiBase}/task/download/${workflow.id}` : undefined
           },
           draggable: true
         }
       ];
 
-      orderedNodes.forEach((node, index) => {
+      visibleCanvasNodes.forEach((node, index) => {
         const isCurrent = nextPendingNode?.id === node.id;
-        const isUpload = node.type === "upload_file";
         const isConfirm = node.type === "user_confirm";
         const parameters = node.parameters as Record<string, unknown>;
         const defaults = NODE_DETAILS[node.type] ?? {
@@ -819,16 +901,17 @@ export default function App() {
           data: {
             id: node.id,
             title: NODE_LABELS[node.type] ?? node.type,
-            subtitle: statusText(node.status),
+            subtitle: node.status === "pending" ? "Waiting for your choice" : statusText(node.status),
             description: readStringParam(parameters, "description", defaults.description),
             purpose: readStringParam(parameters, "purpose", defaults.purpose),
             conversation: readConversation(parameters),
             status: node.status,
             nodeType: node.type,
+            responseText: readStringParam(parameters, "confirmed_value")
+              ? `Chosen: ${readStringParam(parameters, "confirmed_value")}`
+              : "",
             selected: selectedNodeId === node.id,
-            canUpload: isCurrent && isUpload && node.status === "pending",
-            onUpload: handleNodeUpload,
-            canExecute: isCurrent && !isUpload && !isConfirm && node.status === "pending" && !pendingConfirm,
+            canExecute: false,
             running: runningWorkflow,
             onExecute: () => runWorkflow(),
             confirm: isCurrent && isConfirm ? activeConfirm : null,
@@ -848,23 +931,26 @@ export default function App() {
   }, [
     chattingNodeId,
     confirmValue,
+    activeConfirm,
+    apiBase,
     nextPendingNode,
-    orderedNodes,
     pendingConfirm,
     runningWorkflow,
     selectedNodeId,
     setFlowNodes,
     submittingConfirm,
+    uploadNodePending,
+    visibleCanvasNodes,
     workflow
   ]);
 
   const flowEdges = useMemo<Edge[]>(() => {
-    if (!workflow || orderedNodes.length === 0) {
+    if (!workflow || visibleCanvasNodes.length === 0) {
       return [];
     }
 
     const edges: Edge[] = [];
-    const first = orderedNodes[0];
+    const first = visibleCanvasNodes[0];
     edges.push({
       id: `goal-${first.id}`,
       source: "goal",
@@ -879,9 +965,9 @@ export default function App() {
       }
     });
 
-    for (let index = 0; index < orderedNodes.length - 1; index += 1) {
-      const source = orderedNodes[index];
-      const target = orderedNodes[index + 1];
+    for (let index = 0; index < visibleCanvasNodes.length - 1; index += 1) {
+      const source = visibleCanvasNodes[index];
+      const target = visibleCanvasNodes[index + 1];
       const color = source.status === "success" ? "#9ccbb0" : "#b9c3d0";
       edges.push({
         id: `${source.id}-${target.id}`,
@@ -898,7 +984,7 @@ export default function App() {
       });
     }
     return edges;
-  }, [workflow, orderedNodes]);
+  }, [workflow, visibleCanvasNodes]);
 
   const tableColumns = (preview?.columns ?? []).map((column, columnIndex) => ({
     title: column,
@@ -1054,8 +1140,18 @@ export default function App() {
     },
     {
       key: "node",
-      label: "Node",
-      children: selectedNode ? (
+      label: "Bubble",
+      children: selectedNodeId === "goal" && workflow ? (
+        <div className="sidebar-panel">
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Space>
+              <Text strong>Goal</Text>
+              <Tag color={workflow.status === "completed" ? "green" : "blue"}>{workflow.status}</Tag>
+            </Space>
+            <pre className="json-view">{JSON.stringify(workflow.parsed_goal, null, 2)}</pre>
+          </Space>
+        </div>
+      ) : selectedNode ? (
         <div className="sidebar-panel">
           <Space direction="vertical" style={{ width: "100%" }}>
             <Space>
@@ -1103,9 +1199,9 @@ export default function App() {
         <div className="header-main">
           <div>
             <Title level={3} style={{ margin: 0 }}>
-              Goal Workflow Canvas
+              Intent Clarification Canvas
             </Title>
-            <Text type="secondary">Controls live under each bubble card. Drag nodes freely.</Text>
+            <Text type="secondary">Only decisions that need your input appear on canvas. Drag bubbles freely.</Text>
           </div>
           {workflow?.status === "completed" && (
             <Button type="link" href={`${apiBase}/task/download/${workflow.id}`} target="_blank">
@@ -1137,7 +1233,7 @@ export default function App() {
             <div className="canvas-status">
               <Tag color={workflow.status === "completed" ? "green" : "blue"}>{workflow.status}</Tag>
               <Text type="secondary">{workflow.id}</Text>
-              <Text type="secondary">Tip: drag any bubble to adjust layout.</Text>
+              <Text type="secondary">Technical steps stay hidden unless the system needs your input.</Text>
             </div>
 
             <div className="canvas-board">
